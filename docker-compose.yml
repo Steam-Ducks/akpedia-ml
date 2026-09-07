@@ -1,0 +1,8 @@
+services:
+  app:
+    build: .
+    container_name: akpedia-ml
+    environment:
+      APP_PORT: ${APP_PORT:-8000}
+    ports:
+      - "${APP_PORT:-8000}:8000"

@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  REVIEW_TEAM: ${{ vars.REVIEW_TEAM || 'developers' }}
+
+jobs:
+  # ---------------------------------
+  # 1. Padrão de branch e de commits
+  # ---------------------------------
+  validate:
+    name: Padrão de branch & commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validar nome da branch (AKP-<número>)
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          echo "Branch de origem: $BRANCH"
+          if [[ ! "$BRANCH" =~ ^AKP-[0-9]+$ ]]; then
+            echo "::error::Nome de branch inválido: '$BRANCH'. Use o padrão AKP-<número>, ex.: AKP-12."
+            exit 1
+          fi
+          echo "OK: nome de branch dentro do padrão."
+
+      - name: Validar mensagens de commit (Conventional Commits + escopo AKP-<número>)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          # type(AKP-<número>)!: descrição
+          REGEX='^(feat|fix|docs|chore|refactor|test|style|perf|build|ci|revert)\(AKP-[0-9]+\)(!)?: .+'
+          FAIL=0
+          while read -r SHA; do
+            MSG=$(git log -1 --format=%s "$SHA")
+            # Ignora commits de merge
+            if [[ "$MSG" =~ ^Merge ]]; then
+              echo "skip (merge): $MSG"
+              continue
+            fi
+            if [[ ! "$MSG" =~ $REGEX ]]; then
+              echo "::error::Commit fora do padrão: '$MSG'"
+              FAIL=1
+            else
+              echo "OK: $MSG"
+            fi
+          done < <(git rev-list "$BASE".."$HEAD")
+          if [[ "$FAIL" -ne 0 ]]; then
+            echo "::error::Padrão esperado: type(AKP-<número>): descrição  (ex.: feat(AKP-12): adiciona endpoint de saúde)"
+            exit 1
+          fi
+          echo "OK: todos os commits dentro do padrão."
+
+  # ---------------------------------------------------------------------------
+  # 2. Detecta se houve mudança em src/** (features). Config/build ficam de fora.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detectar mudanças em src
+    runs-on: ubuntu-latest
+    outputs:
+      src: ${{ steps.filter.outputs.src }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filtro de caminhos
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            src:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+
+  # -----------------------------------------------------------
+  # 3. Lint (Ruff) (apenas quando src/** tiver alterações)
+  # -----------------------------------------------------------
+  lint:
+    name: Lint Python (Ruff)
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar dependências
+        run: uv sync --frozen
+
+      - name: Rodar Ruff (lint)
+        run: uv run ruff check .
+
+      - name: Rodar Ruff (formatação)
+        run: uv run ruff format --check .
+
+  # --------------------------------------------------------------
+  # 4. Testes de qualidade (apenas quando src/** tiver alterações)
+  # --------------------------------------------------------------
+  quality:
+    name: Testes de qualidade
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar dependências
+        run: uv sync --frozen
+
+      - name: Rodar testes
+        run: uv run pytest
+
+  # -------------------------------------------------------------------
+  # 5. Após todo o workflow passar, solicita revisão de um time da org
+  # -------------------------------------------------------------------
+  request-review:
+    name: Solicitar aprovação da equipe
+    needs: [validate, lint, quality]
+
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Solicitar review do time ${{ env.REVIEW_TEAM }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const team = process.env.REVIEW_TEAM;
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                team_reviewers: [team],
+              });
+              core.info(`Revisão solicitada ao time: ${team}`);
+            } catch (error) {
+              if (error.status === 422) {
+                core.info(`Revisão já solicitada ou time indisponível (${team}). Seguindo.`);
+              } else {
+                core.setFailed(`Falha ao solicitar revisão: ${error.message}`);
+              }
+            }
