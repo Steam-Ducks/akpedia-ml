@@ -1,8 +1,18 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      target: dev
     container_name: akpedia-ml
+    user: "1000:1000"
     environment:
       APP_PORT: ${APP_PORT:-8000}
+      HF_HOME: /cache/hf
+    volumes:
+      - .:/app
+      - model-cache:/cache
     ports:
       - "${APP_PORT:-8000}:8000"
+
+volumes:
+  model-cache:
