@@ -55,6 +55,7 @@ akpedia-ml/
 │       └── documents/ # leitura e extração de texto dos documentos
 │           ├── __init__.py # API pública do pacote
 │           ├── base.py # contrato DocumentTextExtractor + normalização do texto
+│           ├── chunking.py # split_text(): divide o texto em chunks com overlap
 │           ├── errors.py # exceções do processamento
 │           ├── pdf.py # extrator de PDF (pypdf)
 │           ├── registry.py # mapeia extensão/media type -> extrator
@@ -62,6 +63,7 @@ akpedia-ml/
 └── tests/
     ├── __init__.py
     ├── pdf_builder.py # gera PDFs mínimos para os testes
+    ├── test_chunking.py # divisão em chunks e overlap
     ├── test_health.py # teste do endpoint /health
     ├── test_extractor_registry.py # registro de formatos e ponto de extensão
     └── test_pdf_extraction.py # extração de texto de PDF
@@ -101,6 +103,68 @@ herdam de `DocumentProcessingError`.
 3. Registre-o no `default_registry`, em `service.py`.
 
 Nenhum código existente muda — é só o passo 3 que liga o formato novo à aplicação.
+
+---
+
+## Divisão do texto em chunks
+
+Depois de extraído, o texto é dividido em **chunks** por `split_text()`
+(`src/app/documents/chunking.py`). São os chunks que passam pelo modelo de embedding
+e vão para o índice.
+
+```python
+from app.documents import extract_text, split_text
+
+texto = extract_text(conteudo_em_bytes, filename="manual.pdf")
+chunks = split_text(texto)  # defaults abaixo
+chunks = split_text(texto, chunk_size=800, chunk_overlap=100)  # ajustado
+```
+
+| Parâmetro       | Default | O que é |
+|-----------------|---------|---------|
+| `chunk_size`    | `1000`  | Tamanho **máximo** de cada chunk, em caracteres. Limite rígido. |
+| `chunk_overlap` | `200`   | Trecho, em caracteres, repetido do fim de um chunk no início do seguinte. |
+
+Os tamanhos são em **caracteres**, não em tokens, para o divisor não depender do
+tokenizador do modelo. Os defaults foram escolhidos para o chunk caber com folga na
+janela de 512 tokens do `multilingual-e5-small` mesmo com o prefixo `passage:`
+(português fica em torno de 4–5 caracteres por token, então 1000 caracteres ≈ 200–250
+tokens).
+
+### Frases não são cortadas ao meio
+
+O texto é primeiro separado em frases (pontuação final seguida de espaço, ou quebra de
+parágrafo). Os chunks são montados com frases inteiras: se a próxima frase não cabe,
+ela abre o chunk seguinte. Quebras de linha simples **não** são fronteira de frase —
+texto de PDF vem com uma quebra por linha visual, quase sempre no meio da frase — e
+são tratadas como espaço.
+
+Única exceção: uma frase sozinha maior que `chunk_size`. Ela é dividida em pedaços
+por palavra (e, se uma palavra sozinha for maior que `chunk_size`, por caractere) para
+o limite nunca ser ultrapassado.
+
+### Como o overlap funciona
+
+O overlap existe para o contexto não se perder exatamente na fronteira: as frases que
+fecham o chunk *n* são as mesmas que abrem o chunk *n+1*, então um trecho que cruza a
+fronteira está inteiro em pelo menos um dos dois. Regras:
+
+- O overlap é **alinhado por frase**: repete-se o maior conjunto de frases finais
+  inteiras que caiba em `chunk_overlap` caracteres. Por isso ele é um **teto**, não um
+  valor exato — se a última frase tem 250 caracteres e `chunk_overlap` é 200, nada é
+  repetido.
+- `chunk_size` sempre vence: se carregar o overlap estouraria o limite, as frases mais
+  antigas do overlap são descartadas primeiro.
+- `chunk_overlap = 0` desliga o overlap; deve ser menor que `chunk_size`.
+
+Exemplo com `chunk_size=120` e `chunk_overlap=45`, frases `A`–`F`:
+
+```text
+chunk 1: A B
+chunk 2:   B C        <- B repetida (cabe em 45 caracteres)
+chunk 3:     C D E
+chunk 4:         E F  <- E repetida; "D E" não caberia em 45
+```
 
 ---
 
