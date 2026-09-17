@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
+    "pypdf>=6.19.0",
     "uvicorn[standard]>=0.32",
     "pymupdf",
     "python-docx",
