@@ -11,13 +11,35 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 # Instala só as dependências primeiro (melhor cache); depois o código.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
 
 # README.md é referenciado por [project].readme no pyproject.toml, então o
 # build backend (hatchling) precisa dele ao instalar o próprio projeto.
 COPY README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# --- dev: mesmo ambiente do build, com dependências de desenvolvimento ---
+FROM build AS dev
+
+# o estágio build instalou com --no-dev; aqui entram pytest, ruff e httpx
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen
+
+# /cache guarda o modelo de embedding baixado; 777 porque o container roda com o seu UID
+RUN mkdir -p /cache && chmod 777 /cache
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    HF_HOME=/cache/hf
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "src"]
+
 
 # --- runtime: imagem enxuta, sem uv, usuário não-root ---
 FROM python:3.12-slim AS runtime
