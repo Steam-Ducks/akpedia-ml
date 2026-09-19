@@ -11,13 +11,13 @@ from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from app.config import EMBEDDING_MODEL
+
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
-#: Modelo usado pelo serviço (mesmo assumido pelo chunking.py).
-DEFAULT_MODEL_NAME = "intfloat/multilingual-e5-small"
-
 #: e5 espera esse prefixo nos textos indexados; buscas usam "query: ".
+#: Trocar EMBEDDING_MODEL por uma família que não usa prefixo por papel pede revisar isto.
 _PASSAGE_PREFIX = "passage: "
 
 
@@ -36,13 +36,14 @@ class Embedder(ABC):
 
 
 class SentenceTransformerEmbedder(Embedder):
-    """Implementação real, sobre o modelo e5 rodando localmente em CPU.
+    """Implementação real, sobre um modelo sentence-transformers rodando em CPU.
 
-    Carregar o modelo é caro (centenas de MB), então uma instância é criada uma vez
-    e reaproveitada por todas as requisições — veja :func:`get_embedder`.
+    Qual modelo vem de ``EMBEDDING_MODEL`` (default: e5-small multilíngue). Carregá-lo
+    é caro (centenas de MB), então uma instância é criada uma vez e reaproveitada por
+    todas as requisições — veja :func:`get_embedder`.
     """
 
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME) -> None:
+    def __init__(self, model_name: str = EMBEDDING_MODEL) -> None:
         from sentence_transformers import SentenceTransformer
 
         self.model_name = model_name

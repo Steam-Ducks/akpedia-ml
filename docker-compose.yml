@@ -8,6 +8,9 @@ services:
     environment:
       APP_PORT: ${APP_PORT:-8000}
       HF_HOME: /cache/hf
+      # Repassadas vazias quando não definidas no .env: a aplicação aplica o default.
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
     volumes:
       - .:/app
       - model-cache:/cache

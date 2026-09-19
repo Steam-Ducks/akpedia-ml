@@ -43,6 +43,10 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Testes "slow" baixam e rodam o modelo de embedding de verdade: ficam de fora por
+# padrão (e do CI). Para rodá-los: uv run pytest -m slow
+addopts = ["-m", "not slow"]
+markers = ["slow: exercita o modelo de embedding real (baixa centenas de MB)"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

@@ -11,6 +11,7 @@ from app.documents.chunking import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, sp
 from app.documents.errors import (
     DocumentProcessingError,
     DocumentReadError,
+    FileTooLargeError,
     NoExtractableTextError,
     UnsupportedDocumentFormatError,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "DocumentReadError",
     "DocumentTextExtractor",
     "ExtractorRegistry",
+    "FileTooLargeError",
     "NoExtractableTextError",
     "PdfTextExtractor",
     "UnsupportedDocumentFormatError",

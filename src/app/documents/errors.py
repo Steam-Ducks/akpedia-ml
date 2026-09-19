@@ -20,3 +20,7 @@ class DocumentReadError(DocumentProcessingError):
 
 class NoExtractableTextError(DocumentProcessingError):
     """The file was read successfully, but holds no text (a scan without OCR)."""
+
+
+class FileTooLargeError(DocumentProcessingError):
+    """The upload is bigger than the service accepts, so it was never read."""

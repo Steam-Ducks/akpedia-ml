@@ -52,6 +52,7 @@ akpedia-ml/
 │   └── app/
 │       ├── __init__.py
 │       ├── main.py # app FastAPI, rotas registradas e handlers de erro
+│       ├── config.py # configurações lidas de variáveis de ambiente
 │       ├── embeddings.py # contrato Embedder + modelo e5 + get_embedder()
 │       ├── api/
 │       │   ├── __init__.py
@@ -71,7 +72,8 @@ akpedia-ml/
     ├── test_health.py # teste do endpoint /health
     ├── test_extractor_registry.py # registro de formatos e ponto de extensão
     ├── test_pdf_extraction.py # extração de texto de PDF
-    └── test_process_document.py # teste da rota de processamento
+    ├── test_process_document.py # teste da rota de processamento
+    └── test_embeddings_model.py # checagens do modelo real (marcadas como slow)
 ```
 
 ---
@@ -191,6 +193,10 @@ quem persiste é o `akpedia-server`.
 |--------|---------|-------------|------------|
 | `file` | arquivo | sim         | Formato identificado pela extensão e, na falta dela, pelo `Content-Type` |
 
+O upload é limitado a `MAX_UPLOAD_BYTES` (25 MiB por padrão). A leitura do arquivo é
+truncada nesse limite, então um upload grande demais é recusado com `413` em vez de
+ser carregado inteiro na memória só para ser rejeitado depois.
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/documents/process \
   -F "file=@manual.pdf"
@@ -233,12 +239,14 @@ curl -X POST http://localhost:8000/api/v1/documents/process \
 
 | Status | `code`                | Quando |
 |--------|-----------------------|--------|
+| `413`  | `file_too_large`      | Upload acima de `MAX_UPLOAD_BYTES` |
 | `415`  | `unsupported_format`  | Nenhum extrator atende a extensão/media type enviados |
 | `422`  | `unreadable_document` | Formato suportado, mas o arquivo está corrompido, truncado ou protegido por senha |
 | `422`  | `no_extractable_text` | Arquivo lido com sucesso, mas sem texto (PDF digitalizado — OCR ainda não é suportado) |
 | `422`  | *(validação FastAPI)* | Requisição sem o campo `file` |
 
-O campo `supported_extensions` só aparece no `415`.
+O campo `supported_extensions` só aparece no `415`: nos demais erros ele é omitido do
+corpo, e não devolvido como `null`.
 
 A documentação interativa fica em `http://localhost:8000/docs`.
 
@@ -270,16 +278,28 @@ trocar o modelo real por um dublê nos testes (veja `tests/test_process_document
 O modelo é baixado do Hugging Face na primeira execução, para o diretório apontado por
 `HF_HOME`. No Docker isso é o volume `model-cache`, então o download acontece uma vez só.
 
+Qual modelo carregar vem de `EMBEDDING_MODEL` — qualquer modelo do
+`sentence-transformers` serve. Trocá-lo muda o contrato que o `akpedia-server` consome,
+então vale conferir dois pontos: `model.dimensions` (é o `N` da coluna `vector(N)`, e
+reindexar é obrigatório se mudar) e o prefixo `passage: `, que é específico da família
+e5. Os tamanhos padrão de chunk também assumem a janela de 512 tokens do e5.
+
 ---
 
 ## Configuração
 
 A aplicação lê as configurações a partir de variáveis de ambiente (com defaults para dev):
 
-| Variável    | Default     | O que é |
-|-------------|-------------|---------|
-| `APP_PORT`  | `8000`      | Porta publicada pela API |
-| `HF_HOME`   | `/cache/hf` | Onde o modelo de embedding fica em cache (definido no Docker) |
+| Variável           | Default                          | O que é |
+|--------------------|----------------------------------|---------|
+| `APP_PORT`         | `8000`                           | Porta publicada pela API |
+| `HF_HOME`          | `/cache/hf`                      | Onde o modelo de embedding fica em cache (definido no Docker) |
+| `EMBEDDING_MODEL`  | `intfloat/multilingual-e5-small` | Modelo usado para gerar os embeddings |
+| `MAX_UPLOAD_BYTES` | `26214400` (25 MiB)              | Maior upload aceito pela rota de processamento |
+
+As variáveis são lidas uma vez, na subida do processo (`src/app/config.py`): mudar
+qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`
+derruba a aplicação no start, em vez de silenciosamente voltar ao default.
 
 ---
 
@@ -300,6 +320,15 @@ uv run ruff format --check . # verifica a formatação
 
 ```bash
 uv run pytest
+```
+
+A suíte usa um dublê no lugar do modelo de embedding, então roda em segundos e sem
+rede. As checagens contra o modelo real (dimensões e vetores normalizados) estão
+marcadas como `slow` e ficam de fora por padrão — e do CI, que não deve baixar
+centenas de MB a cada PR:
+
+```bash
+uv run pytest -m slow # baixa o modelo na primeira execução
 ```
 
 ---

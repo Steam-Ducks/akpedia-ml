@@ -5,6 +5,7 @@ from app.api.documents import ErrorResponse
 from app.api.documents import router as documents_router
 from app.documents import (
     DocumentReadError,
+    FileTooLargeError,
     NoExtractableTextError,
     UnsupportedDocumentFormatError,
     default_registry,
@@ -22,7 +23,9 @@ def health() -> dict[str, str]:
 
 
 def _error(status_code: int, error: ErrorResponse) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content=error.model_dump())
+    # ``exclude_none`` keeps ``supported_extensions`` out of the failures it says
+    # nothing about, instead of answering them with a null field.
+    return JSONResponse(status_code=status_code, content=error.model_dump(exclude_none=True))
 
 
 @app.exception_handler(UnsupportedDocumentFormatError)
@@ -48,3 +51,9 @@ def handle_unreadable_document(request: Request, exc: DocumentReadError) -> JSON
 def handle_no_extractable_text(request: Request, exc: NoExtractableTextError) -> JSONResponse:
     """422: the file was read, but there is no text to index (a scan without OCR)."""
     return _error(422, ErrorResponse(code="no_extractable_text", message=str(exc)))
+
+
+@app.exception_handler(FileTooLargeError)
+def handle_file_too_large(request: Request, exc: FileTooLargeError) -> JSONResponse:
+    """413: the upload is past the accepted size, so it was never read."""
+    return _error(413, ErrorResponse(code="file_too_large", message=str(exc)))

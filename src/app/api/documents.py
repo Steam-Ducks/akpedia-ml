@@ -11,8 +11,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.config import MAX_UPLOAD_BYTES
 from app.documents import UnsupportedDocumentFormatError, extract_text, split_text
-from app.documents.errors import NoExtractableTextError
+from app.documents.errors import FileTooLargeError, NoExtractableTextError
 from app.embeddings import Embedder, get_embedder
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
@@ -61,6 +62,7 @@ class ErrorResponse(BaseModel):
     response_model=ProcessDocumentResponse,
     summary="Extract, chunk and embed a document",
     responses={
+        413: {"model": ErrorResponse, "description": "Upload is larger than the accepted limit."},
         415: {"model": ErrorResponse, "description": "No extractor handles this format."},
         422: {"model": ErrorResponse, "description": "File could not be read, or holds no text."},
     },
@@ -77,7 +79,7 @@ def process_document(
     if not file.filename and not file.content_type:
         raise UnsupportedDocumentFormatError("The upload has neither a filename nor a media type.")
 
-    content = file.file.read()
+    content = _read_within_limit(file)
     text = extract_text(content, filename=file.filename, media_type=file.content_type)
     chunks = split_text(text)
     if not chunks:
@@ -96,3 +98,31 @@ def process_document(
             for index, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True))
         ],
     )
+
+
+def _read_within_limit(file: UploadFile) -> bytes:
+    """Return the upload's bytes, refusing anything past :data:`MAX_UPLOAD_BYTES`.
+
+    The read is capped instead of unbounded so an oversized upload is not pulled into
+    memory only to be rejected afterwards: one byte over the limit already answers the
+    question. ``file.size`` is checked first because it settles the common case without
+    reading anything at all.
+    """
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        raise FileTooLargeError(_too_large_message(file))
+
+    content = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise FileTooLargeError(_too_large_message(file))
+    return content
+
+
+def _too_large_message(file: UploadFile) -> str:
+    name = f"'{file.filename}'" if file.filename else "The uploaded file"
+    return f"{name} is larger than the {_human_size(MAX_UPLOAD_BYTES)} limit."
+
+
+def _human_size(size: int) -> str:
+    """Render a byte count in the unit the limit was most likely written in."""
+    mebibyte = 1024 * 1024
+    return f"{size / mebibyte:g} MiB" if size >= mebibyte else f"{size} bytes"
