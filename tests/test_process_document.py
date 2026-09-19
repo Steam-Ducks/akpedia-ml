@@ -4,25 +4,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import documents as documents_api
-from app.embeddings import Embedder, get_embedder
+from app.embeddings import get_embedder
 from app.main import app
+from tests.fakes import FakeEmbedder
 from tests.pdf_builder import build_pdf
 
 URL = "/api/v1/documents/process"
-
-
-class FakeEmbedder(Embedder):
-    """Stands in for the real model: the test suite must not download or run it.
-
-    Vectors are derived from the text so that each chunk can be told apart, which is
-    what the route contract is about: one vector per chunk, in the same order.
-    """
-
-    model_name = "fake-embedder"
-    dimensions = 3
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        return [[float(len(text)), float(index), 1.0] for index, text in enumerate(texts)]
 
 
 @pytest.fixture

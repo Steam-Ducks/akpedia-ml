@@ -20,6 +20,11 @@ pytestmark = pytest.mark.slow
 EXPECTED_DIMENSIONS = 384
 
 
+def similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity: the vectors are normalized, so the dot product is enough."""
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
 @pytest.fixture(scope="module")
 def embedder() -> SentenceTransformerEmbedder:
     return SentenceTransformerEmbedder(DEFAULT_EMBEDDING_MODEL)
@@ -31,7 +36,7 @@ def test_model_reports_the_dimensions_the_api_publishes(embedder: SentenceTransf
 
 
 def test_vectors_are_one_per_text_and_normalized(embedder: SentenceTransformerEmbedder):
-    vectors = embedder.embed(["Primeiro trecho do manual.", "Segundo trecho, sobre outro assunto."])
+    vectors = embedder.embed_documents(["Primeiro trecho do manual.", "Segundo trecho, sobre outro assunto."])
 
     assert len(vectors) == 2
     for vector in vectors:
@@ -40,11 +45,11 @@ def test_vectors_are_one_per_text_and_normalized(embedder: SentenceTransformerEm
 
 
 def test_embedding_no_texts_does_not_touch_the_model(embedder: SentenceTransformerEmbedder):
-    assert embedder.embed([]) == []
+    assert embedder.embed_documents([]) == []
 
 
 def test_similar_texts_are_closer_than_unrelated_ones(embedder: SentenceTransformerEmbedder):
-    related, rephrased, unrelated = embedder.embed(
+    related, rephrased, unrelated = embedder.embed_documents(
         [
             "O prazo de garantia do equipamento é de doze meses.",
             "A garantia do aparelho vale por um ano.",
@@ -52,8 +57,25 @@ def test_similar_texts_are_closer_than_unrelated_ones(embedder: SentenceTransfor
         ]
     )
 
-    # Vectors are normalized, so the dot product is the cosine similarity.
-    def similarity(a: list[float], b: list[float]) -> float:
-        return sum(x * y for x, y in zip(a, b, strict=True))
-
     assert similarity(related, rephrased) > similarity(related, unrelated)
+
+
+def test_query_vector_has_the_same_shape_as_a_document_vector(embedder: SentenceTransformerEmbedder):
+    """What the ticket's DoD asks for: the two endpoints' outputs must be comparable."""
+    query = embedder.embed_query("qual é o prazo de garantia?")
+
+    assert len(query) == EXPECTED_DIMENSIONS
+    assert sqrt(sum(value * value for value in query)) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_a_query_is_closest_to_the_passage_that_answers_it(embedder: SentenceTransformerEmbedder):
+    """The role prefixes earn their keep here: query against passages, not passage against passage."""
+    answer, unrelated = embedder.embed_documents(
+        [
+            "O prazo de garantia do equipamento é de doze meses.",
+            "A receita leva três ovos e farinha de trigo.",
+        ]
+    )
+    query = embedder.embed_query("por quanto tempo vale a garantia?")
+
+    assert similarity(query, answer) > similarity(query, unrelated)

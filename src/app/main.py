@@ -1,8 +1,13 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.documents import ErrorResponse
 from app.api.documents import router as documents_router
+from app.api.embeddings import EmptyQueryError, QueryTooLongError
+from app.api.embeddings import router as embeddings_router
+from app.api.schemas import ErrorResponse
 from app.documents import (
     DocumentReadError,
     FileTooLargeError,
@@ -10,10 +15,31 @@ from app.documents import (
     UnsupportedDocumentFormatError,
     default_registry,
 )
+from app.embeddings import get_embedder
 
-app = FastAPI(title="akpedia-ml", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Load the embedding model before the first request is served.
+
+    Loading costs seconds and hundreds of MB. Doing it here, instead of lazily on the
+    first call, means no user pays for it and the process only reports itself as ready
+    once the model is actually in memory -- which is what an orchestrator polling
+    ``/health`` should be told. Every later request reuses the same instance, since
+    ``get_embedder`` is cached.
+
+    Tests that swap the embedder through ``dependency_overrides`` never load the real
+    model: there is nothing to warm up for an instance that will not be used.
+    """
+    if get_embedder not in app.dependency_overrides:
+        get_embedder()
+    yield
+
+
+app = FastAPI(title="akpedia-ml", version="0.1.0", lifespan=lifespan)
 
 app.include_router(documents_router)
+app.include_router(embeddings_router)
 
 
 @app.get("/health")
@@ -57,3 +83,15 @@ def handle_no_extractable_text(request: Request, exc: NoExtractableTextError) ->
 def handle_file_too_large(request: Request, exc: FileTooLargeError) -> JSONResponse:
     """413: the upload is past the accepted size, so it was never read."""
     return _error(413, ErrorResponse(code="file_too_large", message=str(exc)))
+
+
+@app.exception_handler(EmptyQueryError)
+def handle_empty_query(request: Request, exc: EmptyQueryError) -> JSONResponse:
+    """422: there is no search text to embed."""
+    return _error(422, ErrorResponse(code="empty_query", message=str(exc)))
+
+
+@app.exception_handler(QueryTooLongError)
+def handle_query_too_long(request: Request, exc: QueryTooLongError) -> JSONResponse:
+    """422: the search text is past the accepted length."""
+    return _error(422, ErrorResponse(code="query_too_long", message=str(exc)))

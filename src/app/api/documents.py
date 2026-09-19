@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.schemas import EmbeddingModelInfo, ErrorResponse
 from app.config import MAX_UPLOAD_BYTES
 from app.documents import UnsupportedDocumentFormatError, extract_text, split_text
 from app.documents.errors import FileTooLargeError, NoExtractableTextError
@@ -27,14 +28,6 @@ class ProcessedChunk(BaseModel):
     embedding: list[float] = Field(description="Normalized vector of the chunk.", examples=[[0.012, -0.045]])
 
 
-class EmbeddingModelInfo(BaseModel):
-    """Which model produced the vectors, and in what shape."""
-
-    name: str = Field(description="Model identifier.", examples=["intfloat/multilingual-e5-small"])
-    dimensions: int = Field(description="Size of every vector.", examples=[384])
-    normalized: bool = Field(default=True, description="Vectors have length 1, so cosine equals dot product.")
-
-
 class ProcessDocumentResponse(BaseModel):
     """Everything ``akpedia-server`` needs to index the document."""
 
@@ -45,16 +38,6 @@ class ProcessDocumentResponse(BaseModel):
     model: EmbeddingModelInfo
     chunk_count: int = Field(description="Number of chunks returned.", examples=[2])
     chunks: list[ProcessedChunk]
-
-
-class ErrorResponse(BaseModel):
-    """Body of every error answered by this service."""
-
-    code: str = Field(description="Stable identifier of the failure.", examples=["unsupported_format"])
-    message: str = Field(description="Human readable description.")
-    supported_extensions: list[str] | None = Field(
-        default=None, description="Formats this service handles, when the failure is about the format."
-    )
 
 
 @router.post(
@@ -88,7 +71,7 @@ def process_document(
             "Scanned documents need OCR, which this service does not support yet."
         )
 
-    vectors = embedder.embed(chunks)
+    vectors = embedder.embed_documents(chunks)
     return ProcessDocumentResponse(
         filename=file.filename or "",
         model=EmbeddingModelInfo(name=embedder.model_name, dimensions=embedder.dimensions),
