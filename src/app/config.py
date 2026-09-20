@@ -15,6 +15,9 @@ DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 #: Fallback used when ``MAX_UPLOAD_BYTES`` is unset: 25 MiB.
 DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
+#: Fallback used when ``MAX_QUERY_CHARS`` is unset.
+DEFAULT_MAX_QUERY_CHARS = 1000
+
 
 def _positive_int(name: str, default: int) -> int:
     """Read a positive integer from the environment, failing loudly on a bad value.
@@ -43,3 +46,12 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "").strip() or DEFAULT_EMBEDDING_
 #: Largest upload the processing endpoint accepts, in bytes. Anything past it is
 #: refused with ``413`` instead of being read into memory.
 MAX_UPLOAD_BYTES = _positive_int("MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)
+
+
+#: Longest search text ``POST /api/v1/embeddings/query`` accepts, in characters.
+#:
+#: Matches ``chunking.py``'s default ``chunk_size`` on purpose: a query is compared
+#: against chunks, so there is no point accepting one that could not have been a chunk.
+#: The limit also keeps the input inside the model's window -- sentence-transformers
+#: would otherwise truncate it silently and answer with a vector of a text nobody sent.
+MAX_QUERY_CHARS = _positive_int("MAX_QUERY_CHARS", DEFAULT_MAX_QUERY_CHARS)

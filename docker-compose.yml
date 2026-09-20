@@ -11,6 +11,7 @@ services:
       # Repassadas vazias quando não definidas no .env: a aplicação aplica o default.
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
+      MAX_QUERY_CHARS: ${MAX_QUERY_CHARS:-}
     volumes:
       - .:/app
       - model-cache:/cache
