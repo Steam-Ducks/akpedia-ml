@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.documents import ErrorResponse
 from app.api.documents import router as documents_router
+from app.api.embeddings import router as embeddings_router
 from app.documents import (
     DocumentReadError,
     FileTooLargeError,
@@ -14,11 +15,12 @@ from app.documents import (
 app = FastAPI(title="akpedia-ml", version="0.1.0")
 
 app.include_router(documents_router)
+app.include_router(embeddings_router)
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """Health check simples usado por orquestração e pelo CI."""
+    """Simple health check used by orchestration and CI."""
     return {"status": "UP"}
 
 

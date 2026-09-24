@@ -1,8 +1,8 @@
-"""Geração de embeddings dos chunks.
+"""Generate embeddings for document chunks and search queries.
 
-O resto da aplicação depende apenas do contrato :class:`Embedder`: entra uma lista de
-textos, sai um vetor por texto. Trocar de modelo (ou usar um dublê nos testes) é
-escrever outra implementação, sem mexer em quem chama.
+The rest of the application depends only on the :class:`Embedder` contract: it
+receives a list of texts and returns one vector per text. Changing the model (or
+using a test double) only requires another implementation.
 """
 
 from __future__ import annotations
@@ -16,31 +16,36 @@ from app.config import EMBEDDING_MODEL
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
-#: e5 espera esse prefixo nos textos indexados; buscas usam "query: ".
-#: Trocar EMBEDDING_MODEL por uma família que não usa prefixo por papel pede revisar isto.
+#: E5 models expect this prefix for indexed text; searches use ``query: ``.
+#: Switching to a model family without role-specific prefixes requires revisiting this.
 _PASSAGE_PREFIX = "passage: "
+_QUERY_PREFIX = "query: "
 
 
 class Embedder(ABC):
-    """Converte textos em vetores."""
+    """Convert texts into vectors."""
 
-    #: Identificador do modelo, devolvido na resposta da API.
+    #: Model identifier returned in the API response.
     model_name: str
 
-    #: Tamanho de cada vetor: o akpedia-server precisa dele para a coluna vector(N).
+    #: Vector size required by akpedia-server's vector(N) column.
     dimensions: int
 
     @abstractmethod
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Devolve um vetor por texto, na mesma ordem."""
+        """Return one vector per text, in the same order."""
+
+    def embed_query(self, text: str) -> list[float]:
+        """Return the vector for one search query."""
+        return self.embed([text])[0]
 
 
 class SentenceTransformerEmbedder(Embedder):
-    """Implementação real, sobre um modelo sentence-transformers rodando em CPU.
+    """Real implementation using a sentence-transformers model on the CPU.
 
-    Qual modelo vem de ``EMBEDDING_MODEL`` (default: e5-small multilíngue). Carregá-lo
-    é caro (centenas de MB), então uma instância é criada uma vez e reaproveitada por
-    todas as requisições — veja :func:`get_embedder`.
+    The model comes from ``EMBEDDING_MODEL`` (default: multilingual e5-small).
+    Loading it is expensive, so one instance is created and reused for all requests;
+    see :func:`get_embedder`.
     """
 
     def __init__(self, model_name: str = EMBEDDING_MODEL) -> None:
@@ -60,8 +65,15 @@ class SentenceTransformerEmbedder(Embedder):
         )
         return vectors.tolist()
 
+    def embed_query(self, text: str) -> list[float]:
+        vectors = self._model.encode(
+            [f"{_QUERY_PREFIX}{text}"],
+            normalize_embeddings=True,
+        )
+        return vectors[0].tolist()
+
 
 @lru_cache(maxsize=1)
 def get_embedder() -> Embedder:
-    """Instância única do modelo, carregada na primeira chamada."""
+    """Return the singleton model, loaded on the first call."""
     return SentenceTransformerEmbedder()
