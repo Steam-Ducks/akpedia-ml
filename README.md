@@ -56,6 +56,7 @@ akpedia-ml/
 │       ├── main.py # app FastAPI, rotas registradas e handlers de erro
 │       ├── config.py # configurações lidas de variáveis de ambiente
 │       ├── embeddings.py # contrato Embedder + modelo e5 + get_embedder()
+│       ├── worker.py # worker de indexação: python -m app.worker
 │       ├── analysis/ # sugestões para o formulário de upload
 │       │   ├── __init__.py
 │       │   ├── suggestions.py # regras de título e descrição
@@ -81,6 +82,7 @@ akpedia-ml/
     ├── test_analysis_categories.py # centróides e softmax
     ├── test_pdf_inspection.py # leitura de metadados, fontes e parágrafos
     ├── test_build_centroids.py # script de geração dos centróides
+    ├── test_worker.py # worker contra Redis (fakeredis) e um server simulado
     ├── test_chunking.py # divisão em chunks e overlap
     ├── test_health.py # teste do endpoint /health
     ├── test_extractor_registry.py # registro de formatos e ponto de extensão
@@ -324,6 +326,120 @@ A documentação interativa fica em `http://localhost:8000/docs`.
 
 ---
 
+## Worker de indexação
+
+Depois que um documento é aprovado, ele é preparado para a busca em segundo plano pelo
+worker (`src/app/worker.py`), que tira os documentos de uma fila um por vez. É o mesmo
+pipeline do `/process` — extração, chunks e embeddings —, só que disparado pela
+aprovação em vez de pelo upload.
+
+```bash
+INTERNAL_API_TOKEN=... uv run python -m app.worker
+# ou, no Docker:
+docker compose --profile worker up
+```
+
+O serviço `worker` usa a mesma imagem da API com outro comando. Ele fica num *profile*
+próprio porque precisa de um Redis, que ainda não faz parte do ambiente: sem o profile,
+`docker compose up` sobe só a API. O `stop_grace_period` de 2 minutos deixa o documento em
+andamento terminar antes de o container parar.
+
+### Fluxo
+
+1. Lê o stream `DOCUMENTS_STREAM` pelo consumer group `WORKER_GROUP`:
+   `XREADGROUP GROUP ml-workers <consumer> BLOCK 5000 COUNT 1 STREAMS documents:processing >`.
+   O group é criado pelo worker se não existir, começando do início do stream (`0`), para
+   documentos aprovados antes do primeiro worker subir também serem indexados.
+2. Baixa o PDF com `GET /internal/documents/{id}/file`.
+3. Extrai o texto, divide em chunks e gera os embeddings.
+4. Manda o resultado para `POST /internal/documents/{id}/embeddings`, no **mesmo formato da
+   resposta do `/process`**.
+5. Se qualquer passo falhar, chama `POST /internal/documents/{id}/processing-failure`.
+
+O worker **não dá `XACK`**: quem confirma a mensagem é o `akpedia-server`, depois de gravar o
+resultado (ou a falha). Uma falha não derruba o worker; ele segue para a próxima mensagem.
+Se o Redis cair, ele tenta de novo com espera crescente (até 30 s).
+
+### Contrato com o akpedia-server
+
+**Mensagem no stream** — uma por documento aprovado:
+
+```text
+XADD documents:processing * documentId 42
+```
+
+O `documentId` precisa ser numérico; uma mensagem sem ele é registrada no log e ignorada.
+
+**Chamadas do worker** — todas com o header `X-Internal-Token: <INTERNAL_API_TOKEN>`:
+
+| Chamada | Corpo |
+|---------|-------|
+| `GET /internal/documents/{id}/file` | — |
+| `POST /internal/documents/{id}/embeddings` | JSON igual à resposta do `/process`, mais `"messageId"` |
+| `POST /internal/documents/{id}/processing-failure` | `{"code": "...", "message": "...", "messageId": "..."}` |
+
+```json
+{
+  "filename": "manual.pdf",
+  "model": { "name": "intfloat/multilingual-e5-small", "dimensions": 384, "normalized": true },
+  "chunk_count": 2,
+  "chunks": [{ "index": 0, "text": "...", "embedding": [0.012, "..."] }],
+  "messageId": "1792167543003-0"
+}
+```
+
+- O `GET` deve responder o PDF com `Content-Type: application/pdf`. O `filename` do
+  `Content-Disposition` (o `filename*` tem preferência, como o Spring manda), se vier, é
+  repassado no campo `filename` do resultado; sem ele, o worker usa `document-{id}.pdf`.
+  Arquivos acima de `MAX_UPLOAD_BYTES` viram falha.
+- `messageId` é o id da entrada no stream. É com ele que o server faz
+  `XACK documents:processing ml-workers <messageId>` depois de gravar.
+- O `message` da falha é o texto que vai para `processing_error`; o `code` classifica a falha.
+- Qualquer resposta 2xx é sucesso.
+- O segredo é o mesmo `INTERNAL_API_TOKEN` que o server valida.
+
+`code` da falha:
+
+| `code` | Quando |
+|--------|--------|
+| `no_extractable_text` | PDF sem camada de texto (digitalizado) |
+| `unreadable_document` | arquivo corrompido ou protegido por senha |
+| `unsupported_format` | o arquivo não é um formato suportado |
+| `file_too_large` | arquivo acima de `MAX_UPLOAD_BYTES` |
+| `server_call_failed` | o download do arquivo ou o envio do resultado falhou |
+| `processing_error` | qualquer outra falha inesperada |
+
+Se até o aviso de falha não chegar ao server, a mensagem fica pendente no group: o server
+nunca soube dela, então nunca a confirma.
+
+### Logs
+
+Uma linha JSON por evento, com o `documentId`, o `messageId` e a duração (`durationMs`) de
+cada passo (`download`, `extract`, `chunk`, `embed`, `send`):
+
+```json
+{"ts": "2026-10-16T16:20:03.087+00:00", "level": "INFO", "event": "step_finished", "documentId": "42", "messageId": "1792167543003-0", "step": "embed", "durationMs": 33257.0, "chunkCount": 125}
+{"ts": "2026-10-16T16:20:03.256+00:00", "level": "INFO", "event": "document_indexed", "documentId": "42", "messageId": "1792167543003-0", "chunkCount": 125, "durationMs": 33740.4}
+```
+
+Os outros eventos são `document_received`, `step_failed` (duração do passo que falhou),
+`document_failed` (com `step`, `code` e `error`),
+`failure_report_failed`, `message_invalid`, `redis_unavailable`, `worker_starting`,
+`model_loaded` e `worker_stopped`.
+
+### Testes
+
+`tests/test_worker.py` roda o worker contra um stream Redis e um `akpedia-server`
+simulado (um servidor HTTP de verdade numa porta local), cobrindo sucesso e falha. O Redis
+é o `fakeredis` por padrão, então a suíte não precisa de infraestrutura; para rodar contra
+um Redis real:
+
+```bash
+REDIS_TEST_URL=redis://localhost:6379/15 uv run pytest tests/test_worker.py
+```
+
+---
+
 ## Embeddings
 
 Cada chunk é convertido em um vetor pelo modelo
@@ -371,6 +487,13 @@ A aplicação lê as configurações a partir de variáveis de ambiente (com def
 | `CENTROIDS_PATH`   | `data/categories/centroids.npz`  | Centróides de categoria; caminho relativo é resolvido a partir da raiz do repositório |
 | `ANALYSIS_MAX_CHUNKS` | `20`                          | Máximo de chunks embedados para classificar um documento |
 | `CATEGORY_TEMPERATURE` | `0.05`                       | Temperatura do softmax da categoria. `1.0` é o softmax literal, que espalha a probabilidade quase igualmente porque as similaridades ficam próximas |
+| `REDIS_URL`        | `redis://localhost:6379/0`       | Worker: Redis com o stream de documentos aprovados |
+| `DOCUMENTS_STREAM` | `documents:processing`             | Worker: nome do stream |
+| `WORKER_GROUP`     | `ml-workers`                     | Worker: consumer group compartilhado pelas réplicas |
+| `WORKER_CONSUMER`  | nome do host                     | Worker: nome desta réplica no group (no Docker, o id do container) |
+| `SERVER_BASE_URL`  | `http://localhost:8080`          | Worker: endereço do `akpedia-server` |
+| `INTERNAL_API_TOKEN`   | —                                | Worker: segredo do header `X-Internal-Token`. Obrigatório: sem ele o worker não sobe |
+| `SERVER_TIMEOUT_SECONDS` | `30`                       | Worker: timeout de cada chamada ao server |
 
 As variáveis são lidas uma vez, na subida do processo (`src/app/config.py`): mudar
 qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`,

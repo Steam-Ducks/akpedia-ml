@@ -20,5 +20,36 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
 
+  # Indexa os documentos aprovados: mesma imagem da API, outro comando.
+  # Fica no profile "worker" enquanto o Redis não existe no ambiente; para subir:
+  #   docker compose --profile worker up
+  worker:
+    build:
+      context: .
+      target: dev
+    profiles: ["worker"]
+    user: "1000:1000"
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    # O SIGTERM só é atendido entre documentos; um PDF grande leva dezenas de segundos para
+    # embedar, e os 10 s padrão matariam o worker no meio dele, deixando a mensagem pendente.
+    stop_grace_period: 2m
+    environment:
+      HF_HOME: /cache/hf
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
+      # Redis e akpedia-server rodam fora deste compose: por padrão, no host.
+      REDIS_URL: ${REDIS_URL:-redis://host.docker.internal:6379/0}
+      DOCUMENTS_STREAM: ${DOCUMENTS_STREAM:-}
+      WORKER_GROUP: ${WORKER_GROUP:-}
+      SERVER_BASE_URL: ${SERVER_BASE_URL:-http://host.docker.internal:8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      SERVER_TIMEOUT_SECONDS: ${SERVER_TIMEOUT_SECONDS:-}
+    volumes:
+      - .:/app
+      - model-cache:/cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   model-cache:
