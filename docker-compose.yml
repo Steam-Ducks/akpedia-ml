@@ -11,6 +11,9 @@ services:
       # Repassadas vazias quando não definidas no .env: a aplicação aplica o default.
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
+      CENTROIDS_PATH: ${CENTROIDS_PATH:-}
+      ANALYSIS_MAX_CHUNKS: ${ANALYSIS_MAX_CHUNKS:-}
+      CATEGORY_TEMPERATURE: ${CATEGORY_TEMPERATURE:-}
     volumes:
       - .:/app
       - model-cache:/cache

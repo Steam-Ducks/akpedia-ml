@@ -1,7 +1,10 @@
-"""HTTP endpoint that turns an uploaded document into embedded chunks.
+"""HTTP endpoints for uploaded documents.
+
+``/process`` turns a document into embedded chunks for indexing; ``/analyze``
+suggests a title, description and category for the upload form.
 
 The service is stateless: nothing here is stored. ``akpedia-server`` receives the
-chunks with their vectors and is the only one that talks to the database.
+results and is the only one that talks to the database.
 """
 
 from __future__ import annotations
@@ -11,8 +14,16 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.config import MAX_UPLOAD_BYTES
-from app.documents import UnsupportedDocumentFormatError, extract_text, split_text
+from app.analysis import (
+    CategoryCentroids,
+    document_vector,
+    get_centroids,
+    sample_chunks,
+    suggest_description,
+    suggest_title,
+)
+from app.config import ANALYSIS_MAX_CHUNKS, CATEGORY_TEMPERATURE, MAX_UPLOAD_BYTES
+from app.documents import UnsupportedDocumentFormatError, extract_text, inspect_pdf, split_text
 from app.documents.errors import FileTooLargeError, NoExtractableTextError
 from app.embeddings import Embedder, get_embedder
 
@@ -45,6 +56,25 @@ class ProcessDocumentResponse(BaseModel):
     model: EmbeddingModelInfo
     chunk_count: int = Field(description="Number of chunks returned.", examples=[2])
     chunks: list[ProcessedChunk]
+
+
+class AnalyzedDocument(BaseModel):
+    """Suggestions to pre-fill the upload form. The user can change any of them."""
+
+    title: str = Field(description="Suggested title, at most 255 characters.", examples=["Landing Gear Manual"])
+    description: str | None = Field(
+        description="First substantial paragraph, at most 500 characters; null when there is none.",
+        examples=["This manual describes the inspection procedures..."],
+    )
+    category: str | None = Field(
+        description="Most likely category; null when no category centroids are deployed.", examples=["Tecnico"]
+    )
+    confidence: float | None = Field(description="Probability of `category`, from 0 to 1.", examples=[0.82])
+    scores: dict[str, float] = Field(
+        description="Probability of every category, summing to 1; empty when `category` is null.",
+        examples=[{"Tecnico": 0.82, "Regulatorio": 0.09, "Juridico": 0.03, "Qualidade": 0.06}],
+    )
+    pages: int = Field(description="Number of pages in the PDF.", examples=[34])
 
 
 class ErrorResponse(BaseModel):
@@ -83,10 +113,7 @@ def process_document(
     text = extract_text(content, filename=file.filename, media_type=file.content_type)
     chunks = split_text(text)
     if not chunks:
-        raise NoExtractableTextError(
-            f"No text could be extracted from '{file.filename or 'the uploaded file'}'. "
-            "Scanned documents need OCR, which this service does not support yet."
-        )
+        raise _no_text_error(file)
 
     vectors = embedder.embed(chunks)
     return ProcessDocumentResponse(
@@ -97,6 +124,68 @@ def process_document(
             ProcessedChunk(index=index, text=chunk, embedding=vector)
             for index, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True))
         ],
+    )
+
+
+@router.post(
+    "/analyze",
+    response_model=AnalyzedDocument,
+    summary="Suggest a title, description and category for a document",
+    responses={
+        413: {"model": ErrorResponse, "description": "Upload is larger than the accepted limit."},
+        415: {"model": ErrorResponse, "description": "No extractor handles this format."},
+        422: {"model": ErrorResponse, "description": "File could not be read, or holds no text."},
+    },
+)
+def analyze_document(
+    file: UploadFile,
+    embedder: Annotated[Embedder, Depends(get_embedder)],
+    centroids: Annotated[CategoryCentroids | None, Depends(get_centroids)],
+) -> AnalyzedDocument:
+    """Read a PDF and suggest what the upload form asks for.
+
+    Only the text layer is read: a scanned document without one answers ``422``.
+    Without a centroids file the category is ``null``; the title and description are
+    still suggested. Nothing is stored and no vector is returned.
+    """
+    if not file.filename and not file.content_type:
+        raise UnsupportedDocumentFormatError("The upload has neither a filename nor a media type.")
+
+    content = _read_within_limit(file)
+    # The registry goes first: an unsupported format is a 415 from it, not a PDF
+    # that PyMuPDF failed to open.
+    text = extract_text(content, filename=file.filename, media_type=file.content_type)
+    chunks = split_text(text)
+    if not chunks:
+        raise _no_text_error(file)
+
+    inspection = inspect_pdf(content)
+    title = suggest_title(
+        metadata_title=inspection.metadata_title,
+        largest_font_line=inspection.largest_font_line,
+        filename=file.filename,
+    )
+    description = suggest_description(inspection.paragraphs, title=title)
+
+    category = None
+    if centroids is not None:
+        vectors = embedder.embed(sample_chunks(chunks, ANALYSIS_MAX_CHUNKS))
+        category = centroids.score(document_vector(vectors), temperature=CATEGORY_TEMPERATURE)
+
+    return AnalyzedDocument(
+        title=title,
+        description=description,
+        category=category.category if category else None,
+        confidence=category.confidence if category else None,
+        scores=category.scores if category else {},
+        pages=inspection.page_count,
+    )
+
+
+def _no_text_error(file: UploadFile) -> NoExtractableTextError:
+    return NoExtractableTextError(
+        f"No text could be extracted from '{file.filename or 'the uploaded file'}'. "
+        "Scanned documents need OCR, which this service does not support yet."
     )
 
 

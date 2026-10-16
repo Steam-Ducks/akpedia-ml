@@ -48,26 +48,39 @@ akpedia-ml/
 ├── .gitignore
 ├── .env.example
 ├── README.md
+├── scripts/
+│   └── build_centroids.py # gera os centróides de categoria a partir de um manifest
 ├── src/
 │   └── app/
 │       ├── __init__.py
 │       ├── main.py # app FastAPI, rotas registradas e handlers de erro
 │       ├── config.py # configurações lidas de variáveis de ambiente
 │       ├── embeddings.py # contrato Embedder + modelo e5 + get_embedder()
+│       ├── analysis/ # sugestões para o formulário de upload
+│       │   ├── __init__.py
+│       │   ├── suggestions.py # regras de título e descrição
+│       │   └── categories.py # centróides, média dos vetores e softmax
 │       ├── api/
 │       │   ├── __init__.py
-│       │   └── documents.py # POST /api/v1/documents/process
+│       │   └── documents.py # POST /api/v1/documents/process e /analyze
 │       └── documents/ # leitura e extração de texto dos documentos
 │           ├── __init__.py # API pública do pacote
 │           ├── base.py # contrato DocumentTextExtractor + normalização do texto
 │           ├── chunking.py # split_text(): divide o texto em chunks com overlap
 │           ├── errors.py # exceções do processamento
+│           ├── inspection.py # metadados, fontes e parágrafos do PDF (PyMuPDF)
 │           ├── pdf.py # extrator de PDF (pypdf)
 │           ├── registry.py # mapeia extensão/media type -> extrator
 │           └── service.py # extract_text(): ponto de entrada usado pela aplicação
 └── tests/
     ├── __init__.py
     ├── pdf_builder.py # gera PDFs mínimos para os testes
+    ├── pdf_fixtures.py # gera PDFs com título nos metadados e tamanhos de fonte
+    ├── test_analyze_document.py # teste da rota de análise
+    ├── test_analysis_suggestions.py # regras de título e descrição
+    ├── test_analysis_categories.py # centróides e softmax
+    ├── test_pdf_inspection.py # leitura de metadados, fontes e parágrafos
+    ├── test_build_centroids.py # script de geração dos centróides
     ├── test_chunking.py # divisão em chunks e overlap
     ├── test_health.py # teste do endpoint /health
     ├── test_extractor_registry.py # registro de formatos e ponto de extensão
@@ -248,6 +261,65 @@ curl -X POST http://localhost:8000/api/v1/documents/process \
 O campo `supported_extensions` só aparece no `415`: nos demais erros ele é omitido do
 corpo, e não devolvido como `null`.
 
+### `POST /api/v1/documents/analyze`
+
+Lê um PDF e sugere o que o formulário de upload pede: título, descrição e categoria.
+Serve para poupar digitação e deixar o aprovador ver a categoria provável sem ler o
+documento inteiro. Nada é gravado e nenhum vetor é devolvido.
+
+Mesma requisição do `/process` (`multipart/form-data`, campo `file`), mesmo limite de
+tamanho e mesmos erros (`413`, `415`, `422`). Só a camada de texto é lida: um PDF
+digitalizado sem texto responde `422 no_extractable_text`.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/analyze \
+  -F "file=@manual.pdf"
+```
+
+**Resposta `200`**
+
+```json
+{
+  "title": "Landing Gear Maintenance Manual",
+  "description": "This manual describes the inspection procedures...",
+  "category": "Tecnico",
+  "confidence": 0.82,
+  "scores": { "Tecnico": 0.82, "Regulatorio": 0.09, "Juridico": 0.03, "Qualidade": 0.06 },
+  "pages": 34
+}
+```
+
+| Campo | Como é obtido |
+|-------|---------------|
+| `title` | Por prioridade: (1) `/Info /Title` do PDF, sem prefixos como `Microsoft Word - ` e ignorando valores genéricos (`Untitled`, `Sem título`); (2) a linha de maior fonte da primeira página, se ela for maior que o corpo do texto; (3) o nome do arquivo sem extensão. No máximo 255 caracteres. |
+| `description` | Primeiro parágrafo das 3 primeiras páginas com pelo menos 40 caracteres e diferente do título, com espaços normalizados e cortado em 500 caracteres sem partir palavra. `null` se nenhum servir. |
+| `category`, `confidence`, `scores` | O texto é dividido em chunks (até `ANALYSIS_MAX_CHUNKS`, amostrados ao longo do documento), cada chunk vira embedding, a média normalizada é comparada por cosseno com o centróide de cada categoria e as similaridades passam por um softmax com temperatura `CATEGORY_TEMPERATURE`. `confidence` é a probabilidade da vencedora; `scores` soma 1. |
+| `pages` | Número de páginas do PDF. |
+
+Sem o arquivo de centróides a rota continua respondendo `200`, com `category` e
+`confidence` `null` e `scores` vazio.
+
+Os parágrafos e tamanhos de fonte vêm do PyMuPDF, que preserva o layout; o texto usado
+nos embeddings vem do mesmo extrator do `/process` (pypdf).
+
+#### Centróides de categoria
+
+Os centróides são gerados a partir de documentos já classificados:
+
+```bash
+uv run python scripts/build_centroids.py --manifest data/categories/manifest.csv
+```
+
+O manifest é um CSV com cabeçalho, uma coluna de caminho (`path`, `file` ou `filename`)
+e uma de categoria (`category` ou `label`). Caminhos relativos são resolvidos a partir
+da pasta do manifest; documentos ilegíveis são reportados e pulados. A saída padrão é
+`data/categories/centroids.npz` (chaves `labels` e `vectors`), lida uma vez na subida
+do serviço — gerar de novo exige reiniciar. Um arquivo presente mas malformado derruba
+o serviço no start.
+
+Os centróides pertencem ao modelo que os gerou: trocar `EMBEDDING_MODEL` exige
+gerá-los de novo.
+
 A documentação interativa fica em `http://localhost:8000/docs`.
 
 ---
@@ -295,11 +367,15 @@ A aplicação lê as configurações a partir de variáveis de ambiente (com def
 | `APP_PORT`         | `8000`                           | Porta publicada pela API |
 | `HF_HOME`          | `/cache/hf`                      | Onde o modelo de embedding fica em cache (definido no Docker) |
 | `EMBEDDING_MODEL`  | `intfloat/multilingual-e5-small` | Modelo usado para gerar os embeddings |
-| `MAX_UPLOAD_BYTES` | `26214400` (25 MiB)              | Maior upload aceito pela rota de processamento |
+| `MAX_UPLOAD_BYTES` | `26214400` (25 MiB)              | Maior upload aceito pelas rotas de documento |
+| `CENTROIDS_PATH`   | `data/categories/centroids.npz`  | Centróides de categoria; caminho relativo é resolvido a partir da raiz do repositório |
+| `ANALYSIS_MAX_CHUNKS` | `20`                          | Máximo de chunks embedados para classificar um documento |
+| `CATEGORY_TEMPERATURE` | `0.05`                       | Temperatura do softmax da categoria. `1.0` é o softmax literal, que espalha a probabilidade quase igualmente porque as similaridades ficam próximas |
 
 As variáveis são lidas uma vez, na subida do processo (`src/app/config.py`): mudar
-qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`
-derruba a aplicação no start, em vez de silenciosamente voltar ao default.
+qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`,
+`ANALYSIS_MAX_CHUNKS` ou `CATEGORY_TEMPERATURE` derruba a aplicação no start, em vez de
+silenciosamente voltar ao default.
 
 ---
 

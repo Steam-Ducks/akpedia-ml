@@ -15,6 +15,7 @@ from app.documents.errors import (
     NoExtractableTextError,
     UnsupportedDocumentFormatError,
 )
+from app.documents.inspection import PdfInspection, inspect_pdf
 from app.documents.pdf import PdfTextExtractor
 from app.documents.registry import ExtractorRegistry, file_extension
 from app.documents.service import default_registry, extract_text
@@ -28,11 +29,13 @@ __all__ = [
     "ExtractorRegistry",
     "FileTooLargeError",
     "NoExtractableTextError",
+    "PdfInspection",
     "PdfTextExtractor",
     "UnsupportedDocumentFormatError",
     "default_registry",
     "extract_text",
     "file_extension",
+    "inspect_pdf",
     "normalize_text_parts",
     "split_sentences",
     "split_text",
