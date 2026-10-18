@@ -11,6 +11,8 @@ import unicodedata
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 
+from app.documents.inspection import has_words
+
 #: Size of ``documents.name`` in akpedia-server.
 MAX_TITLE_LENGTH = 255
 
@@ -19,6 +21,11 @@ MAX_DESCRIPTION_LENGTH = 500
 
 #: Shorter paragraphs are headings, captions or labels, not a description.
 MIN_DESCRIPTION_LENGTH = 40
+
+#: Fewest words in a paragraph that reads as prose.
+_MIN_PROSE_WORDS = 6
+
+_SPACE_BEFORE_PUNCTUATION = re.compile(r"\s+([.,;:!?])")
 
 #: Prefixes that office suites and print-to-PDF drivers put in front of the file name.
 _PRODUCER_PREFIX = re.compile(
@@ -55,38 +62,59 @@ def suggest_title(
     metadata_title: str | None,
     largest_font_line: str | None,
     filename: str | None,
+    regulatory_title: str | None = None,
 ) -> str:
     """Pick the document title, by priority.
 
-    1. The PDF's ``/Info /Title``, without producer prefixes such as
+    1. The subject line of a document laid out as ``subject / AGENCY: / SUMMARY:``
+       (Federal Register rules and airworthiness directives). When that structure is
+       there, it names the document better than anything else in the file.
+    2. The PDF's ``/Info /Title``, without producer prefixes such as
        ``"Microsoft Word - "`` and ignored when it is a placeholder (``Untitled``).
-    2. The line in the largest font on the first page.
-    3. The file name without its extension.
+    3. The line in the largest font on the first page.
+    4. The file name without its extension.
 
-    The result fits in :data:`MAX_TITLE_LENGTH`. It is empty only when the upload has
-    no file name and the PDF gave nothing to go on.
+    A candidate without words (a page number, a date, a code) is skipped. The result
+    fits in :data:`MAX_TITLE_LENGTH`. It is empty only when the upload has no file name
+    and the PDF gave nothing to go on.
     """
-    candidates = (_clean_metadata_title(metadata_title), _collapse(largest_font_line), _filename_stem(filename))
+    candidates = (
+        _worded(regulatory_title),
+        _clean_metadata_title(metadata_title),
+        _worded(largest_font_line),
+        _filename_stem(filename),
+    )
     for candidate in candidates:
         if candidate:
             return truncate_at_word(candidate, MAX_TITLE_LENGTH)
     return ""
 
 
-def suggest_description(paragraphs: Iterable[str], *, title: str | None = None) -> str | None:
-    """Return the first paragraph long enough to describe the document.
+def suggest_description(
+    paragraphs: Iterable[str], *, title: str | None = None, summary: str | None = None
+) -> str | None:
+    """Return the text that best describes the document.
 
-    Paragraphs shorter than :data:`MIN_DESCRIPTION_LENGTH` and the paragraph holding
-    just the title are skipped. Whitespace is collapsed and the result is cut at a word
-    boundary to :data:`MAX_DESCRIPTION_LENGTH`. ``None`` when nothing qualifies.
+    A ``SUMMARY:`` section, when the document has one, is the description its authors
+    wrote, so it wins. Otherwise it is the first paragraph long enough: paragraphs
+    shorter than :data:`MIN_DESCRIPTION_LENGTH` and the paragraph holding just the
+    title are skipped, and a paragraph that reads as prose is preferred over one that
+    reads as a heading ("U.S. Department of Transportation Federal Aviation
+    Administration" on a cover). Whitespace is collapsed and the result is cut at a
+    word boundary to :data:`MAX_DESCRIPTION_LENGTH`. ``None`` when nothing qualifies.
     """
+    summary_text = _collapse(summary)
+    if len(summary_text) >= MIN_DESCRIPTION_LENGTH:
+        return truncate_at_word(summary_text, MAX_DESCRIPTION_LENGTH)
+
     title_key = _collapse(title).casefold()
-    for paragraph in paragraphs:
-        text = _collapse(paragraph)
-        if len(text) < MIN_DESCRIPTION_LENGTH or text.casefold() == title_key:
-            continue
-        return truncate_at_word(text, MAX_DESCRIPTION_LENGTH)
-    return None
+    eligible = [
+        text
+        for text in (_collapse(paragraph) for paragraph in paragraphs)
+        if len(text) >= MIN_DESCRIPTION_LENGTH and text.casefold() != title_key
+    ]
+    chosen = next((text for text in eligible if _reads_as_prose(text)), None) or next(iter(eligible), None)
+    return truncate_at_word(chosen, MAX_DESCRIPTION_LENGTH) if chosen else None
 
 
 def truncate_at_word(text: str, limit: int) -> str:
@@ -109,6 +137,28 @@ def _clean_metadata_title(title: str | None) -> str:
     if not stripped or _title_key(stripped) in _GENERIC_TITLES:
         return ""
     return stripped
+
+
+def _worded(text: str | None) -> str:
+    """A title read from the page, tidied, or ``""`` when it has no words.
+
+    Text laid out on a cover often leaves a space before punctuation and a stray
+    period at the end ("Balloon Safety Tips ."); neither belongs in a title.
+    """
+    collapsed = _SPACE_BEFORE_PUNCTUATION.sub(r"\1", _collapse(text))
+    if collapsed.endswith(".") and not collapsed.endswith(".."):
+        collapsed = collapsed[:-1].rstrip()
+    return collapsed if has_words(collapsed) else ""
+
+
+def _reads_as_prose(text: str) -> bool:
+    """Whether ``text`` reads as running text rather than a heading or a label.
+
+    Prose has a few words and most of them start in lowercase; a heading capitalizes
+    nearly every word.
+    """
+    words = [word for word in text.split() if word[0].isalpha()]
+    return len(words) >= _MIN_PROSE_WORDS and sum(word[0].islower() for word in words) * 2 >= len(words)
 
 
 def _filename_stem(filename: str | None) -> str:

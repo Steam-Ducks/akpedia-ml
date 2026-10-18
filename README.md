@@ -75,7 +75,9 @@ akpedia-ml/
 └── tests/
     ├── __init__.py
     ├── pdf_builder.py # gera PDFs mínimos para os testes
-    ├── pdf_fixtures.py # gera PDFs com título nos metadados e tamanhos de fonte
+    ├── pdf_fixtures.py # gera PDFs com título nos metadados, tamanhos de fonte, colunas e cabeçalho
+    ├── fixtures/real/ # PDFs reais de domínio público (Federal Register, FAA) para regressão
+    ├── test_real_documents.py # título e descrição sugeridos para os documentos reais
     ├── test_analyze_document.py # teste da rota de análise
     ├── test_analysis_suggestions.py # regras de título e descrição
     ├── test_analysis_categories.py # centróides e softmax
@@ -291,8 +293,8 @@ curl -X POST http://localhost:8000/api/v1/documents/analyze \
 
 | Campo | Como é obtido |
 |-------|---------------|
-| `title` | Por prioridade: (1) `/Info /Title` do PDF, sem prefixos como `Microsoft Word - ` e ignorando valores genéricos (`Untitled`, `Sem título`); (2) a linha de maior fonte da primeira página, se ela for maior que o corpo do texto; (3) o nome do arquivo sem extensão. No máximo 255 caracteres. |
-| `description` | Primeiro parágrafo das 3 primeiras páginas com pelo menos 40 caracteres e diferente do título, com espaços normalizados e cortado em 500 caracteres sem partir palavra. `null` se nenhum servir. |
+| `title` | Por prioridade: (1) em documentos no padrão do Federal Register, a linha de assunto logo acima de `AGENCY:`; (2) `/Info /Title` do PDF, sem prefixos como `Microsoft Word - ` e ignorando valores genéricos (`Untitled`, `Sem título`); (3) o texto de maior fonte da primeira página com texto, se ele for maior que o corpo do texto; (4) o nome do arquivo sem extensão. Candidatos sem palavras (número de página, data, código) são ignorados. No máximo 255 caracteres. |
+| `description` | O parágrafo `SUMMARY:`, quando o documento tem um. Senão, o primeiro parágrafo das 3 primeiras páginas com pelo menos 40 caracteres e diferente do título, preferindo os que se leem como texto corrido a linhas em formato de título. Espaços normalizados e corte em 500 caracteres sem partir palavra. `null` se nenhum servir. |
 | `category`, `confidence`, `scores` | O texto é dividido em chunks (até `ANALYSIS_MAX_CHUNKS`, amostrados ao longo do documento), cada chunk vira embedding, a média normalizada é comparada por cosseno com o centróide de cada categoria e as similaridades passam por um softmax com temperatura `CATEGORY_TEMPERATURE`. `confidence` é a probabilidade da vencedora; `scores` soma 1. |
 | `pages` | Número de páginas do PDF. |
 
@@ -301,6 +303,31 @@ Sem o arquivo de centróides a rota continua respondendo `200`, com `category` e
 
 Os parágrafos e tamanhos de fonte vêm do PyMuPDF, que preserva o layout; o texto usado
 nos embeddings vem do mesmo extrator do `/process` (pypdf).
+
+Como o layout é lido:
+
+- **Mobília da página fica de fora.** Sai o texto que se repete em mais de uma página
+  (cabeçalho e rodapé corridos, ignorando a numeração) e o texto sem palavras nas faixas de
+  cabeçalho e rodapé (8% de cima e de baixo), como um número de página solto. Sem isso, num
+  documento como o Federal Register o número da página virava o título e o cabeçalho
+  "55451 Federal Register / Vol. 91…" virava a descrição. Texto *com* palavras na faixa, mas
+  que não se repete, fica — só que depois do corpo —, porque pode ser conteúdo perto da borda,
+  como a primeira linha de uma planilha convertida.
+- **Colunas são lidas uma depois da outra**, e não intercaladas linha a linha. Blocos que
+  ocupam quase toda a largura da página separam as faixas de colunas.
+- **Título por tamanho de fonte:** o tamanho do "corpo do texto" é medido nas primeiras
+  páginas, não só na capa (que tem tão pouco texto que o próprio título vira a maioria).
+  Tamanhos a menos de 10% do maior contam como empate, e vence o mais alto na página; as
+  linhas logo abaixo no mesmo tamanho entram no título, mesmo em blocos separados. Uma capa
+  só com imagem é pulada: vale a primeira página com texto.
+- **Federal Register:** a linha de assunto é procurada **pela posição** — o texto mais próximo
+  acima de `AGENCY:` na mesma coluna. Esses documentos são impressos em colunas, a primeira
+  página costuma começar com o fim do documento anterior, e o mesmo PDF pode trazer outros
+  documentos do mesmo órgão depois.
+
+`tests/test_real_documents.py` roda essas regras em documentos reais (Federal Register e um
+folheto da FAA digitalizado com OCR), com e sem o título dos metadados. Um documento novo que
+der sugestão ruim deve entrar lá antes de a regra ser ajustada.
 
 #### Centróides de categoria
 
