@@ -42,6 +42,10 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://host.docker.internal:6379/0}
       DOCUMENTS_STREAM: ${DOCUMENTS_STREAM:-}
       WORKER_GROUP: ${WORKER_GROUP:-}
+      # Nome fixo: com o hostname (o id do container), cada container recriado entraria no
+      # group com um nome novo e as mensagens pendentes do anterior ficariam órfãs.
+      # Ao escalar para mais de uma réplica, dê um nome diferente a cada uma.
+      WORKER_CONSUMER: ${WORKER_CONSUMER:-akpedia-ml-worker}
       SERVER_BASE_URL: ${SERVER_BASE_URL:-http://host.docker.internal:8080}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       SERVER_TIMEOUT_SECONDS: ${SERVER_TIMEOUT_SECONDS:-}

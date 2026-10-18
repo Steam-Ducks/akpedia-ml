@@ -23,6 +23,7 @@ import fakeredis
 import pytest
 import redis
 
+from app.embeddings import Embedder
 from app.worker import (
     MESSAGE_ID_FIELD,
     TOKEN_HEADER,
@@ -467,3 +468,159 @@ def test_log_lines_are_json_with_the_event_fields():
     assert line["level"] == "INFO"
     assert line["documentId"] == "42" and line["step"] == "embed" and line["durationMs"] == 12.5
     assert line["ts"].endswith("+00:00")
+
+
+# --- pending entries after a restart ------------------------------------------
+
+
+def deliver_without_processing(redis_client: redis.Redis, stream: str, consumer: str = "worker-1") -> None:
+    """What a worker that died mid-document leaves behind: a delivered, unacknowledged entry."""
+    redis_client.xreadgroup(GROUP, consumer, {stream: ">"}, count=1)
+
+
+def test_restarted_worker_resumes_its_own_pending_message_first(
+    worker: IndexingWorker, server: SimulatedServer, redis_client: redis.Redis, stream: str
+):
+    worker.ensure_group()
+    server.serve_pdf("1", build_pdf(["Documento interrompido no meio."]))
+    server.serve_pdf("2", build_pdf(["Documento novo."]))
+    approve(redis_client, stream, "1")
+    deliver_without_processing(redis_client, stream)
+    approve(redis_client, stream, "2")
+
+    assert worker.poll() == 1
+    assert worker.poll() == 1
+
+    assert [r.path for r in server.calls("/embeddings")] == [
+        "/internal/documents/1/embeddings",
+        "/internal/documents/2/embeddings",
+    ]
+
+
+def test_pending_list_is_read_once_and_does_not_loop(
+    worker: IndexingWorker, server: SimulatedServer, redis_client: redis.Redis, stream: str
+):
+    # The worker never acknowledges, so the entries stay pending after being resumed:
+    # reading the pending list from the start again would return them forever.
+    worker.ensure_group()
+    for document_id in ("1", "2"):
+        server.serve_pdf(document_id, build_pdf([f"Documento {document_id}."]))
+        approve(redis_client, stream, document_id)
+        deliver_without_processing(redis_client, stream)
+
+    handled = [worker.poll() for _ in range(4)]
+
+    assert handled == [1, 1, 0, 0]
+    assert len(server.calls("/embeddings")) == 2
+
+
+def test_pending_messages_of_other_consumers_are_left_alone(
+    worker: IndexingWorker, server: SimulatedServer, redis_client: redis.Redis, stream: str
+):
+    worker.ensure_group()
+    approve(redis_client, stream, "1")
+    deliver_without_processing(redis_client, stream, consumer="worker-2")
+
+    assert worker.poll() == 0
+    assert server.requests == []
+
+
+def test_pending_entry_deleted_from_the_stream_is_skipped(
+    worker: IndexingWorker, server: SimulatedServer, redis_client: redis.Redis, stream: str, caplog
+):
+    # Redis answers a deleted entry with no fields (nil; fakeredis gives an empty dict).
+    worker.ensure_group()
+    message_id = approve(redis_client, stream, "1")
+    deliver_without_processing(redis_client, stream)
+    redis_client.xdel(stream, message_id)
+
+    with caplog.at_level(logging.INFO, logger="app.worker"):
+        worker.poll()
+
+    assert server.requests == []
+    assert "message_deleted" in [r.getMessage() for r in caplog.records]
+
+
+def test_malformed_encoded_filename_falls_back_instead_of_failing(
+    worker: IndexingWorker, server: SimulatedServer, redis_client: redis.Redis, stream: str
+):
+    headers = {"Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="=?x-unknown?Q?a?="'}
+    server.files["42"] = (200, build_pdf(["Documento com nome estranho."]), headers)
+    worker.ensure_group()
+    approve(redis_client, stream)
+
+    worker.poll()
+
+    assert server.calls("processing-failure") == []
+    assert server.calls("/embeddings")[0].json()["filename"] == "document-42.pdf"
+
+
+# --- documents that keep killing the worker ------------------------------------
+
+
+class _WorkerKilled(BaseException):
+    """Stands in for the process dying mid-document: nothing in the worker catches it."""
+
+
+class KillingEmbedder(FakeEmbedder):
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise _WorkerKilled()
+
+
+def restarted_worker(redis_client: redis.Redis, server: SimulatedServer, stream: str, embedder: Embedder):
+    """A fresh worker process with the same consumer name, as after a container restart."""
+    return IndexingWorker(
+        redis_client=redis_client,
+        server=ServerClient(server.url, TOKEN, timeout=5),
+        embedder=embedder,
+        stream=stream,
+        group=GROUP,
+        consumer="worker-1",
+        block_ms=100,
+    )
+
+
+def deliveries(redis_client: redis.Redis, stream: str, message_id: str) -> int:
+    [entry] = redis_client.xpending_range(stream, GROUP, min=message_id, max=message_id, count=1)
+    return entry["times_delivered"]
+
+
+def test_document_that_keeps_killing_the_worker_is_given_up_after_three_deliveries(
+    server: SimulatedServer, redis_client: redis.Redis, stream: str
+):
+    server.serve_pdf("1", build_pdf(["Documento que derruba o worker."]))
+    server.serve_pdf("2", build_pdf(["Documento que chegou depois."]))
+    restarted_worker(redis_client, server, stream, FakeEmbedder()).ensure_group()
+    poison = approve(redis_client, stream, "1")
+
+    # Three runs die in the middle of the same document: the first takes it as a new
+    # message, the next two resume it from the pending list.
+    for _ in range(3):
+        with pytest.raises(_WorkerKilled):
+            restarted_worker(redis_client, server, stream, KillingEmbedder()).poll()
+    assert deliveries(redis_client, stream, poison) == 3
+
+    approve(redis_client, stream, "2")
+    healthy = restarted_worker(redis_client, server, stream, FakeEmbedder())
+
+    assert healthy.poll() == 1  # gives the poisoned document up instead of a fourth try
+    assert healthy.poll() == 1  # and the queue moves on
+
+    [failure] = server.calls("/internal/documents/1/processing-failure")
+    assert failure.json()["code"] == "retry_limit_exceeded"
+    assert "3 times" in failure.json()["message"]
+    assert [r.path for r in server.calls("/embeddings")] == ["/internal/documents/2/embeddings"]
+
+
+def test_resuming_a_pending_message_counts_as_a_delivery(
+    worker: IndexingWorker, server: SimulatedServer, redis_client: redis.Redis, stream: str
+):
+    worker.ensure_group()
+    server.serve_pdf("1", build_pdf(["Documento interrompido."]))
+    message_id = approve(redis_client, stream, "1")
+    deliver_without_processing(redis_client, stream)
+
+    worker.poll()
+
+    assert deliveries(redis_client, stream, message_id) == 2
+    assert len(server.calls("/internal/documents/1/embeddings")) == 1

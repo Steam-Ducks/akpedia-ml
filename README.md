@@ -360,6 +360,24 @@ O worker **não dá `XACK`**: quem confirma a mensagem é o `akpedia-server`, de
 resultado (ou a falha). Uma falha não derruba o worker; ele segue para a próxima mensagem.
 Se o Redis cair, ele tenta de novo com espera crescente (até 30 s).
 
+**Mensagens pendentes ao reiniciar.** Ao subir, antes de ler mensagens novas, o worker retoma
+as mensagens que **ele mesmo** recebeu e o server nunca confirmou: o processo parou no meio de
+um documento, ou nem o aviso de falha chegou ao server. A lista é lida uma vez, com um cursor
+que avança a cada entrada — como o worker nunca dá `XACK`, ler do início de novo devolveria
+sempre a mesma mensagem. Isso só funciona se o nome do consumer for estável entre reinícios
+(`WORKER_CONSUMER`; no docker-compose o padrão é `akpedia-ml-worker`). Retomar pode reprocessar
+um documento que o server já gravou mas ainda não confirmou; o server trata o callback repetido
+como idempotente.
+
+Cada retomada conta como uma entrega (`XCLAIM`). Uma mensagem já entregue **3 vezes** não é
+tentada de novo: o worker manda `processing-failure` com o código `retry_limit_exceeded` e segue
+para a próxima. Sem esse limite, um documento que derruba o worker (um PDF que estoura a
+memória, por exemplo) seria retomado primeiro a cada reinício e travaria a fila inteira.
+
+Mensagens pendentes de **outros** consumers (um worker que sumiu de vez) ficam com o job de
+recuperação do `akpedia-server` (`XAUTOCLAIM` agendado, com o mesmo limite de 3 tentativas),
+para não haver dois componentes disputando as mesmas mensagens.
+
 ### Contrato com o akpedia-server
 
 **Mensagem no stream** — uma por documento aprovado:
@@ -407,10 +425,15 @@ O `documentId` precisa ser numérico; uma mensagem sem ele é registrada no log 
 | `unsupported_format` | o arquivo não é um formato suportado |
 | `file_too_large` | arquivo acima de `MAX_UPLOAD_BYTES` |
 | `server_call_failed` | o download do arquivo ou o envio do resultado falhou |
+| `retry_limit_exceeded` | a mensagem já foi entregue 3 vezes sem terminar (o worker caiu no meio do documento) |
 | `processing_error` | qualquer outra falha inesperada |
 
 Se até o aviso de falha não chegar ao server, a mensagem fica pendente no group: o server
-nunca soube dela, então nunca a confirma.
+nunca soube dela, então nunca a confirma. O próprio worker a retoma no próximo reinício, ou o
+job de recuperação do server a reivindica.
+
+Um `Content-Disposition` com nome malformado (charset desconhecido, encoded word quebrada)
+não falha o documento: o nome cai para `document-{id}.pdf`.
 
 ### Logs
 
@@ -424,8 +447,8 @@ cada passo (`download`, `extract`, `chunk`, `embed`, `send`):
 
 Os outros eventos são `document_received`, `step_failed` (duração do passo que falhou),
 `document_failed` (com `step`, `code` e `error`),
-`failure_report_failed`, `message_invalid`, `redis_unavailable`, `worker_starting`,
-`model_loaded` e `worker_stopped`.
+`failure_report_failed`, `message_invalid`, `message_deleted`, `pending_resumed`,
+`pending_drained`, `redis_unavailable`, `worker_starting`, `model_loaded` e `worker_stopped`.
 
 ### Testes
 
@@ -490,7 +513,7 @@ A aplicação lê as configurações a partir de variáveis de ambiente (com def
 | `REDIS_URL`        | `redis://localhost:6379/0`       | Worker: Redis com o stream de documentos aprovados |
 | `DOCUMENTS_STREAM` | `documents:processing`             | Worker: nome do stream |
 | `WORKER_GROUP`     | `ml-workers`                     | Worker: consumer group compartilhado pelas réplicas |
-| `WORKER_CONSUMER`  | nome do host                     | Worker: nome desta réplica no group (no Docker, o id do container) |
+| `WORKER_CONSUMER`  | nome do host (`akpedia-ml-worker` no docker-compose) | Worker: nome desta réplica no group. Precisa ser estável entre reinícios para retomar as próprias mensagens pendentes; com várias réplicas, um nome por réplica |
 | `SERVER_BASE_URL`  | `http://localhost:8080`          | Worker: endereço do `akpedia-server` |
 | `INTERNAL_API_TOKEN`   | —                                | Worker: segredo do header `X-Internal-Token`. Obrigatório: sem ele o worker não sobe |
 | `SERVER_TIMEOUT_SECONDS` | `30`                       | Worker: timeout de cada chamada ao server |
