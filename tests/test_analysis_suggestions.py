@@ -124,3 +124,69 @@ def test_cut_falls_on_the_last_whole_word():
 
 def test_single_word_past_the_limit_is_cut_hard():
     assert truncate_at_word("anticonstitucionalissimamente", 10) == "anticonsti"
+
+
+# --- regulatory documents and page furniture ----------------------------------
+
+
+def test_regulatory_subject_wins_over_every_other_rule():
+    result = suggest_title(
+        regulatory_title="Airworthiness Directives; Lycoming Engines",
+        metadata_title="Federal Register Volume 91",
+        largest_font_line="PART 39-AIRWORTHINESS",
+        filename="2026-17032.pdf",
+    )
+
+    assert result == "Airworthiness Directives; Lycoming Engines"
+
+
+@pytest.mark.parametrize("line", ["55451", "2026-17-07", "§ 39.13"])
+def test_largest_font_without_words_falls_through_to_the_filename(line: str):
+    assert title(None, largest=line, filename="balloon_safety_tips.pdf") == "balloon_safety_tips"
+
+
+def test_regulatory_subject_without_words_is_ignored():
+    result = suggest_title(
+        regulatory_title="2026-17-07", metadata_title=None, largest_font_line=None, filename="ad.pdf"
+    )
+
+    assert result == "ad"
+
+
+def test_summary_is_the_description_when_the_document_has_one():
+    paragraphs = ["55451 Federal Register / Vol. 91, No. 166 / Friday, August 28, 2026 / Rules and Regulations"]
+    summary = "The FAA is adopting a new airworthiness directive (AD) for certain Lycoming engines."
+
+    assert suggest_description(paragraphs, summary=summary) == summary
+
+
+def test_summary_too_short_falls_back_to_the_paragraphs():
+    paragraphs = ["Este manual descreve os procedimentos de inspecao periodica."]
+
+    assert suggest_description(paragraphs, summary="Ver abaixo.") == paragraphs[0]
+
+
+def test_long_summary_is_cut_at_a_word_boundary():
+    result = suggest_description([], summary="palavra " * 100)
+
+    assert result is not None and len(result) <= MAX_DESCRIPTION_LENGTH and not result.endswith(" ")
+
+
+def test_prose_paragraph_is_preferred_over_a_heading_like_one():
+    paragraphs = [
+        "U.S. Department of Transportation Federal Aviation Administration",
+        "This handbook introduces the basic pilot knowledge and skills for balloons.",
+    ]
+
+    assert suggest_description(paragraphs) == paragraphs[1]
+
+
+def test_heading_like_paragraph_is_used_when_nothing_reads_as_prose():
+    paragraphs = ["Sumario", "U.S. Department of Transportation Federal Aviation Administration"]
+
+    assert suggest_description(paragraphs) == paragraphs[1]
+
+
+def test_stray_punctuation_is_tidied_from_a_title_read_on_the_page():
+    assert title(None, largest="Balloon Safety Tips .") == "Balloon Safety Tips"
+    assert title(None, largest="Manual , revisao 2") == "Manual, revisao 2"

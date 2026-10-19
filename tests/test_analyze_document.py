@@ -9,7 +9,7 @@ from app.api import documents as documents_api
 from app.embeddings import Embedder, get_embedder
 from app.main import app
 from tests.pdf_builder import build_pdf
-from tests.pdf_fixtures import Span, build_styled_pdf
+from tests.pdf_fixtures import Span, build_federal_register_pdf, build_styled_pdf
 
 URL = "/api/v1/documents/analyze"
 
@@ -170,3 +170,14 @@ def test_upload_past_the_size_limit_returns_413(client: TestClient, monkeypatch:
 
     assert response.status_code == 413
     assert response.json()["code"] == "file_too_large"
+
+
+def test_federal_register_document_gets_its_subject_and_summary(client: TestClient):
+    # The case reported from the upload screen: title "55451", description = running header.
+    response = upload(client, build_federal_register_pdf(), "2026-17032.pdf")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "Airworthiness Directives; Lycoming Engines"
+    assert body["description"] == "The FAA adopts an AD for Lycoming engines."
+    assert body["pages"] == 2

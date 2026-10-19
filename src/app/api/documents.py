@@ -163,9 +163,10 @@ def analyze_document(
     title = suggest_title(
         metadata_title=inspection.metadata_title,
         largest_font_line=inspection.largest_font_line,
+        regulatory_title=inspection.regulatory_title,
         filename=file.filename,
     )
-    description = suggest_description(inspection.paragraphs, title=title)
+    description = suggest_description(inspection.paragraphs, title=title, summary=inspection.regulatory_summary)
 
     category = None
     if centroids is not None:
