@@ -123,6 +123,19 @@ jobs:
     needs: changes
     if: needs.changes.outputs.src == 'true'
     runs-on: ubuntu-latest
+    # Redis real para os testes do worker (sem REDIS_TEST_URL eles usam o fakeredis).
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      REDIS_TEST_URL: redis://localhost:6379/15
     steps:
       - name: Checkout
         uses: actions/checkout@v4

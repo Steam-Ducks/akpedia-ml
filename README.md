@@ -339,8 +339,10 @@ INTERNAL_API_TOKEN=... uv run python -m app.worker
 docker compose --profile worker up
 ```
 
-O serviço `worker` usa a mesma imagem da API com outro comando. Ele fica num *profile*
-próprio porque precisa de um Redis, que ainda não faz parte do ambiente: sem o profile,
+O serviço `worker` usa a mesma imagem da API com outro comando. O Redis sobe no compose
+do `akpedia-server` (container `akpedia-redis`), que cria a rede `akpedia-net`; o worker
+entra nela e o alcança pelo nome, então suba o compose do server primeiro. O worker fica
+num *profile* próprio enquanto o server não tem os endpoints `/internal`: sem o profile,
 `docker compose up` sobe só a API. O `stop_grace_period` de 2 minutos deixa o documento em
 andamento terminar antes de o container parar.
 
@@ -455,7 +457,7 @@ Os outros eventos são `document_received`, `step_failed` (duração do passo qu
 `tests/test_worker.py` roda o worker contra um stream Redis e um `akpedia-server`
 simulado (um servidor HTTP de verdade numa porta local), cobrindo sucesso e falha. O Redis
 é o `fakeredis` por padrão, então a suíte não precisa de infraestrutura; para rodar contra
-um Redis real:
+um Redis real (é o que o CI faz):
 
 ```bash
 REDIS_TEST_URL=redis://localhost:6379/15 uv run pytest tests/test_worker.py
