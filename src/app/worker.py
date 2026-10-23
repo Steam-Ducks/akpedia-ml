@@ -61,6 +61,11 @@ MESSAGE_ID_FIELD = "messageId"
 #: How long one ``XREADGROUP`` waits for a message, in milliseconds.
 BLOCK_MS = 5000
 
+#: How long a Redis reply may take, in seconds. It must outlast ``BLOCK_MS``: redis-py 8
+#: defaults to 5 s, the same as the block, so every wait on an empty stream would time
+#: out and be taken for an outage, pausing the worker up to ``_MAX_BACKOFF_SECONDS``.
+SOCKET_TIMEOUT_SECONDS = BLOCK_MS / 1000 + 5
+
 #: Longest pause between attempts while Redis is unreachable, in seconds.
 _MAX_BACKOFF_SECONDS = 30.0
 
@@ -377,6 +382,11 @@ def configure_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def connect_redis(url: str) -> redis.Redis:
+    """A Redis client whose replies may take longer than one ``XREADGROUP`` block."""
+    return redis.Redis.from_url(url, socket_timeout=SOCKET_TIMEOUT_SECONDS)
+
+
 def main() -> int:
     configure_logging()
     if not config.INTERNAL_API_TOKEN:
@@ -401,7 +411,7 @@ def main() -> int:
     _log(logging.INFO, "model_loaded", model=embedder.model_name, durationMs=_elapsed_ms(started))
 
     server = ServerClient(config.SERVER_BASE_URL, config.INTERNAL_API_TOKEN, timeout=config.SERVER_TIMEOUT_SECONDS)
-    worker = IndexingWorker(redis_client=redis.Redis.from_url(config.REDIS_URL), server=server, embedder=embedder)
+    worker = IndexingWorker(redis_client=connect_redis(config.REDIS_URL), server=server, embedder=embedder)
     try:
         worker.run(stop)
     finally:

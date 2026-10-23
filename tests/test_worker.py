@@ -25,11 +25,13 @@ import redis
 
 from app.embeddings import Embedder
 from app.worker import (
+    BLOCK_MS,
     MESSAGE_ID_FIELD,
     TOKEN_HEADER,
     IndexingWorker,
     JsonFormatter,
     ServerClient,
+    connect_redis,
 )
 from tests.pdf_builder import build_pdf
 from tests.test_process_document import FakeEmbedder
@@ -385,6 +387,34 @@ def test_message_without_a_valid_document_id_calls_nothing(
 
 
 # --- loop and setup -----------------------------------------------------------
+
+
+def test_redis_replies_may_take_longer_than_one_block():
+    client = connect_redis("redis://localhost:6379/0")
+    assert client.connection_pool.connection_kwargs["socket_timeout"] > BLOCK_MS / 1000
+    client.close()
+
+
+@pytest.mark.skipif(not os.getenv("REDIS_TEST_URL"), reason="fakeredis never times out on a blocking read")
+def test_waiting_on_an_empty_stream_is_not_taken_for_an_outage(server: SimulatedServer, stream: str):
+    redis_client = connect_redis(os.environ["REDIS_TEST_URL"])
+    client = ServerClient(server.url, TOKEN, timeout=5)
+    worker = IndexingWorker(
+        redis_client=redis_client,
+        server=client,
+        embedder=FakeEmbedder(),
+        stream=stream,
+        group=GROUP,
+        consumer="worker-1",
+        block_ms=BLOCK_MS,
+    )
+    worker.ensure_group()
+
+    assert worker.poll() == 0
+    assert worker.poll() == 0
+
+    redis_client.close()
+    client.close()
 
 
 def test_ensure_group_is_idempotent(worker: IndexingWorker):
