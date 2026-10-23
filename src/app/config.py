@@ -8,6 +8,7 @@ values are read once, at import time: changing them means restarting the process
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 
 #: Repository root (``src/app/config.py`` -> two levels up from ``src``). Relative
@@ -93,3 +94,30 @@ ANALYSIS_MAX_CHUNKS = _positive_int("ANALYSIS_MAX_CHUNKS", DEFAULT_ANALYSIS_MAX_
 #: almost evenly. Dividing by a small temperature turns that lead into a confidence
 #: that reads like one: with ``0.05`` a 0.05 lead is worth a factor of e (~2.7).
 CATEGORY_TEMPERATURE = _positive_float("CATEGORY_TEMPERATURE", DEFAULT_CATEGORY_TEMPERATURE)
+
+# --- Indexing worker (``python -m app.worker``) -------------------------------
+# Read here like everything else, but only the worker uses them: the API process
+# starts fine without Redis or a server token.
+
+#: Redis holding the stream of approved documents.
+REDIS_URL = os.getenv("REDIS_URL", "").strip() or "redis://localhost:6379/0"
+
+#: Stream akpedia-server adds approved documents to, one ``documentId`` per message.
+DOCUMENTS_STREAM = os.getenv("DOCUMENTS_STREAM", "").strip() or "documents:processing"
+
+#: Consumer group shared by every worker replica, so each message goes to one of them.
+WORKER_GROUP = os.getenv("WORKER_GROUP", "").strip() or "ml-workers"
+
+#: This replica's name inside the group. Defaults to the host name, which is the
+#: container id under Docker, so replicas never share a name.
+WORKER_CONSUMER = os.getenv("WORKER_CONSUMER", "").strip() or socket.gethostname()
+
+#: akpedia-server, where the worker downloads files and sends results to.
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "").strip() or "http://localhost:8080"
+
+#: Shared secret sent as ``X-Internal-Token`` on the ``/internal`` routes. No default:
+#: the worker refuses to start without it.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
+
+#: Timeout for each call to akpedia-server, in seconds.
+SERVER_TIMEOUT_SECONDS = _positive_float("SERVER_TIMEOUT_SECONDS", 30.0)

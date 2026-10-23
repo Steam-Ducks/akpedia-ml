@@ -20,5 +20,51 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
 
+  # Indexa os documentos aprovados: mesma imagem da API, outro comando.
+  # O Redis sobe no compose do akpedia-server (container akpedia-redis, rede akpedia-net):
+  # suba aquele primeiro. Fica no profile "worker" até o server ter os endpoints /internal
+  # e o INTERNAL_API_TOKEN; para subir:
+  #   docker compose --profile worker up
+  worker:
+    build:
+      context: .
+      target: dev
+    profiles: ["worker"]
+    user: "1000:1000"
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    # O SIGTERM só é atendido entre documentos; um PDF grande leva dezenas de segundos para
+    # embedar, e os 10 s padrão matariam o worker no meio dele, deixando a mensagem pendente.
+    stop_grace_period: 2m
+    environment:
+      HF_HOME: /cache/hf
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
+      # Redis é alcançado pelo nome do container, na rede akpedia-net.
+      REDIS_URL: ${REDIS_URL:-redis://akpedia-redis:6379/0}
+      DOCUMENTS_STREAM: ${DOCUMENTS_STREAM:-}
+      WORKER_GROUP: ${WORKER_GROUP:-}
+      # Nome fixo: com o hostname (o id do container), cada container recriado entraria no
+      # group com um nome novo e as mensagens pendentes do anterior ficariam órfãs.
+      # Ao escalar para mais de uma réplica, dê um nome diferente a cada uma.
+      WORKER_CONSUMER: ${WORKER_CONSUMER:-akpedia-ml-worker}
+      # O akpedia-server roda fora deste compose: por padrão, no host.
+      SERVER_BASE_URL: ${SERVER_BASE_URL:-http://host.docker.internal:8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      SERVER_TIMEOUT_SECONDS: ${SERVER_TIMEOUT_SECONDS:-}
+    volumes:
+      - .:/app
+      - model-cache:/cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - akpedia-net
+
 volumes:
   model-cache:
+
+networks:
+  # Criada pelo compose do akpedia-server, dono do Redis.
+  akpedia-net:
+    external: true

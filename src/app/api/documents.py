@@ -113,11 +113,20 @@ def process_document(
     text = extract_text(content, filename=file.filename, media_type=file.content_type)
     chunks = split_text(text)
     if not chunks:
-        raise _no_text_error(file)
+        raise no_text_error(file.filename)
 
-    vectors = embedder.embed(chunks)
+    return build_process_response(file.filename, embedder, chunks, embedder.embed(chunks))
+
+
+def build_process_response(
+    filename: str | None,
+    embedder: Embedder,
+    chunks: list[str],
+    vectors: list[list[float]],
+) -> ProcessDocumentResponse:
+    """Assemble the ``/process`` answer; the indexing worker sends akpedia-server the same body."""
     return ProcessDocumentResponse(
-        filename=file.filename or "",
+        filename=filename or "",
         model=EmbeddingModelInfo(name=embedder.model_name, dimensions=embedder.dimensions),
         chunk_count=len(chunks),
         chunks=[
@@ -157,7 +166,7 @@ def analyze_document(
     text = extract_text(content, filename=file.filename, media_type=file.content_type)
     chunks = split_text(text)
     if not chunks:
-        raise _no_text_error(file)
+        raise no_text_error(file.filename)
 
     inspection = inspect_pdf(content)
     title = suggest_title(
@@ -183,9 +192,10 @@ def analyze_document(
     )
 
 
-def _no_text_error(file: UploadFile) -> NoExtractableTextError:
+def no_text_error(filename: str | None) -> NoExtractableTextError:
+    """The failure for a document whose text layer is empty, worded the same everywhere."""
     return NoExtractableTextError(
-        f"No text could be extracted from '{file.filename or 'the uploaded file'}'. "
+        f"No text could be extracted from '{filename or 'the uploaded file'}'. "
         "Scanned documents need OCR, which this service does not support yet."
     )
 
