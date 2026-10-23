@@ -20,16 +20,13 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
 
-  # Indexa os documentos aprovados: mesma imagem da API, outro comando.
+  # Indexa os documentos aprovados: mesma imagem da API, outro comando, e sobe junto com ela.
   # O Redis sobe no compose do akpedia-server (container akpedia-redis, rede akpedia-net):
-  # suba aquele primeiro. Fica no profile "worker" até o server ter os endpoints /internal
-  # e o INTERNAL_API_TOKEN; para subir:
-  #   docker compose --profile worker up
+  # suba aquele primeiro, ou este compose não encontra a rede.
   worker:
     build:
       context: .
       target: dev
-    profiles: ["worker"]
     user: "1000:1000"
     command: ["python", "-m", "app.worker"]
     restart: unless-stopped
@@ -50,7 +47,9 @@ services:
       WORKER_CONSUMER: ${WORKER_CONSUMER:-akpedia-ml-worker}
       # O akpedia-server roda fora deste compose: por padrão, no host.
       SERVER_BASE_URL: ${SERVER_BASE_URL:-http://host.docker.internal:8080}
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      # Segredo das rotas /internal do server. O compose do akpedia-server cai no mesmo valor
+      # de desenvolvimento; fora do ambiente local, defina um de verdade nos dois lados.
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-akpedia-dev-internal-token}
       SERVER_TIMEOUT_SECONDS: ${SERVER_TIMEOUT_SECONDS:-}
     volumes:
       - .:/app
