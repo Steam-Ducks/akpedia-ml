@@ -1,6 +1,10 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.analysis import get_centroids
 from app.api.documents import ErrorResponse
 from app.api.documents import router as documents_router
 from app.api.embeddings import router as embeddings_router
@@ -12,7 +16,16 @@ from app.documents import (
     default_registry,
 )
 
-app = FastAPI(title="akpedia-ml", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Read the category centroids at startup: a malformed file stops the service here
+    # instead of failing the first upload. A missing file is fine (no category).
+    get_centroids()
+    yield
+
+
+app = FastAPI(title="akpedia-ml", version="0.1.0", lifespan=lifespan)
 
 app.include_router(documents_router)
 app.include_router(embeddings_router)

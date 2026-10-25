@@ -48,26 +48,43 @@ akpedia-ml/
 ├── .gitignore
 ├── .env.example
 ├── README.md
+├── scripts/
+│   └── build_centroids.py # gera os centróides de categoria a partir de um manifest
 ├── src/
 │   └── app/
 │       ├── __init__.py
 │       ├── main.py # app FastAPI, rotas registradas e handlers de erro
 │       ├── config.py # configurações lidas de variáveis de ambiente
 │       ├── embeddings.py # contrato Embedder + modelo e5 + get_embedder()
+│       ├── worker.py # worker de indexação: python -m app.worker
+│       ├── analysis/ # sugestões para o formulário de upload
+│       │   ├── __init__.py
+│       │   ├── suggestions.py # regras de título e descrição
+│       │   └── categories.py # centróides, média dos vetores e softmax
 │       ├── api/
 │       │   ├── __init__.py
-│       │   └── documents.py # POST /api/v1/documents/process
+│       │   └── documents.py # POST /api/v1/documents/process e /analyze
 │       └── documents/ # leitura e extração de texto dos documentos
 │           ├── __init__.py # API pública do pacote
 │           ├── base.py # contrato DocumentTextExtractor + normalização do texto
 │           ├── chunking.py # split_text(): divide o texto em chunks com overlap
 │           ├── errors.py # exceções do processamento
+│           ├── inspection.py # metadados, fontes e parágrafos do PDF (PyMuPDF)
 │           ├── pdf.py # extrator de PDF (pypdf)
 │           ├── registry.py # mapeia extensão/media type -> extrator
 │           └── service.py # extract_text(): ponto de entrada usado pela aplicação
 └── tests/
     ├── __init__.py
     ├── pdf_builder.py # gera PDFs mínimos para os testes
+    ├── pdf_fixtures.py # gera PDFs com título nos metadados, tamanhos de fonte, colunas e cabeçalho
+    ├── fixtures/real/ # PDFs reais de domínio público (Federal Register, FAA) para regressão
+    ├── test_real_documents.py # título e descrição sugeridos para os documentos reais
+    ├── test_analyze_document.py # teste da rota de análise
+    ├── test_analysis_suggestions.py # regras de título e descrição
+    ├── test_analysis_categories.py # centróides e softmax
+    ├── test_pdf_inspection.py # leitura de metadados, fontes e parágrafos
+    ├── test_build_centroids.py # script de geração dos centróides
+    ├── test_worker.py # worker contra Redis (fakeredis) e um server simulado
     ├── test_chunking.py # divisão em chunks e overlap
     ├── test_health.py # teste do endpoint /health
     ├── test_extractor_registry.py # registro de formatos e ponto de extensão
@@ -248,7 +265,233 @@ curl -X POST http://localhost:8000/api/v1/documents/process \
 O campo `supported_extensions` só aparece no `415`: nos demais erros ele é omitido do
 corpo, e não devolvido como `null`.
 
+### `POST /api/v1/documents/analyze`
+
+Lê um PDF e sugere o que o formulário de upload pede: título, descrição e categoria.
+Serve para poupar digitação e deixar o aprovador ver a categoria provável sem ler o
+documento inteiro. Nada é gravado e nenhum vetor é devolvido.
+
+Mesma requisição do `/process` (`multipart/form-data`, campo `file`), mesmo limite de
+tamanho e mesmos erros (`413`, `415`, `422`). Só a camada de texto é lida: um PDF
+digitalizado sem texto responde `422 no_extractable_text`.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/analyze \
+  -F "file=@manual.pdf"
+```
+
+**Resposta `200`**
+
+```json
+{
+  "title": "Landing Gear Maintenance Manual",
+  "description": "This manual describes the inspection procedures...",
+  "category": "Tecnico",
+  "confidence": 0.82,
+  "scores": { "Tecnico": 0.82, "Regulatorio": 0.09, "Juridico": 0.03, "Qualidade": 0.06 },
+  "pages": 34
+}
+```
+
+| Campo | Como é obtido |
+|-------|---------------|
+| `title` | Por prioridade: (1) em documentos no padrão do Federal Register, a linha de assunto logo acima de `AGENCY:`; (2) `/Info /Title` do PDF, sem prefixos como `Microsoft Word - ` e ignorando valores genéricos (`Untitled`, `Sem título`); (3) o texto de maior fonte da primeira página com texto, se ele for maior que o corpo do texto; (4) o nome do arquivo sem extensão. Candidatos sem palavras (número de página, data, código) são ignorados. No máximo 255 caracteres. |
+| `description` | O parágrafo `SUMMARY:`, quando o documento tem um. Senão, o primeiro parágrafo das 3 primeiras páginas com pelo menos 40 caracteres e diferente do título, preferindo os que se leem como texto corrido a linhas em formato de título. Espaços normalizados e corte em 500 caracteres sem partir palavra. `null` se nenhum servir. |
+| `category`, `confidence`, `scores` | O texto é dividido em chunks (até `ANALYSIS_MAX_CHUNKS`, amostrados ao longo do documento), cada chunk vira embedding, a média normalizada é comparada por cosseno com o centróide de cada categoria e as similaridades passam por um softmax com temperatura `CATEGORY_TEMPERATURE`. `confidence` é a probabilidade da vencedora; `scores` soma 1. |
+| `pages` | Número de páginas do PDF. |
+
+Sem o arquivo de centróides a rota continua respondendo `200`, com `category` e
+`confidence` `null` e `scores` vazio.
+
+Os parágrafos e tamanhos de fonte vêm do PyMuPDF, que preserva o layout; o texto usado
+nos embeddings vem do mesmo extrator do `/process` (pypdf).
+
+Como o layout é lido:
+
+- **Mobília da página fica de fora.** Sai o texto que se repete em mais de uma página
+  (cabeçalho e rodapé corridos, ignorando a numeração) e o texto sem palavras nas faixas de
+  cabeçalho e rodapé (8% de cima e de baixo), como um número de página solto. Sem isso, num
+  documento como o Federal Register o número da página virava o título e o cabeçalho
+  "55451 Federal Register / Vol. 91…" virava a descrição. Texto *com* palavras na faixa, mas
+  que não se repete, fica — só que depois do corpo —, porque pode ser conteúdo perto da borda,
+  como a primeira linha de uma planilha convertida.
+- **Colunas são lidas uma depois da outra**, e não intercaladas linha a linha. Blocos que
+  ocupam quase toda a largura da página separam as faixas de colunas.
+- **Título por tamanho de fonte:** o tamanho do "corpo do texto" é medido nas primeiras
+  páginas, não só na capa (que tem tão pouco texto que o próprio título vira a maioria).
+  Tamanhos a menos de 10% do maior contam como empate, e vence o mais alto na página; as
+  linhas logo abaixo no mesmo tamanho entram no título, mesmo em blocos separados. Uma capa
+  só com imagem é pulada: vale a primeira página com texto.
+- **Federal Register:** a linha de assunto é procurada **pela posição** — o texto mais próximo
+  acima de `AGENCY:` na mesma coluna. Esses documentos são impressos em colunas, a primeira
+  página costuma começar com o fim do documento anterior, e o mesmo PDF pode trazer outros
+  documentos do mesmo órgão depois.
+
+`tests/test_real_documents.py` roda essas regras em documentos reais (Federal Register e um
+folheto da FAA digitalizado com OCR), com e sem o título dos metadados. Um documento novo que
+der sugestão ruim deve entrar lá antes de a regra ser ajustada.
+
+#### Centróides de categoria
+
+Os centróides são gerados a partir de documentos já classificados:
+
+```bash
+uv run python scripts/build_centroids.py --manifest data/categories/manifest.csv
+```
+
+O manifest é um CSV com cabeçalho, uma coluna de caminho (`path`, `file` ou `filename`)
+e uma de categoria (`category` ou `label`). Caminhos relativos são resolvidos a partir
+da pasta do manifest; documentos ilegíveis são reportados e pulados. A saída padrão é
+`data/categories/centroids.npz` (chaves `labels` e `vectors`), lida uma vez na subida
+do serviço — gerar de novo exige reiniciar. Um arquivo presente mas malformado derruba
+o serviço no start.
+
+Os centróides pertencem ao modelo que os gerou: trocar `EMBEDDING_MODEL` exige
+gerá-los de novo.
+
 A documentação interativa fica em `http://localhost:8000/docs`.
+
+---
+
+## Worker de indexação
+
+Depois que um documento é aprovado, ele é preparado para a busca em segundo plano pelo
+worker (`src/app/worker.py`), que tira os documentos de uma fila um por vez. É o mesmo
+pipeline do `/process` — extração, chunks e embeddings —, só que disparado pela
+aprovação em vez de pelo upload.
+
+```bash
+INTERNAL_API_TOKEN=... uv run python -m app.worker
+# ou, no Docker, junto com a API:
+docker compose up
+```
+
+No dev container, `akpedia run ml` (ou só `akpedia run`) sobe a API e o worker juntos.
+
+O serviço `worker` usa a mesma imagem da API com outro comando, e o `docker compose up`
+sobe os dois. O Redis sobe no compose do `akpedia-server` (container `akpedia-redis`), que
+cria a rede `akpedia-net`; o worker entra nela e o alcança pelo nome, então suba o compose do
+server primeiro. Os dois composes caem no mesmo `INTERNAL_API_TOKEN` de desenvolvimento
+quando ele não está definido; fora do ambiente local, defina um valor de verdade nos dois. O
+`stop_grace_period` de 2 minutos deixa o documento em andamento terminar antes de o
+container parar.
+
+### Fluxo
+
+1. Lê o stream `DOCUMENTS_STREAM` pelo consumer group `WORKER_GROUP`:
+   `XREADGROUP GROUP ml-workers <consumer> BLOCK 5000 COUNT 1 STREAMS documents:processing >`.
+   O group é criado pelo worker se não existir, começando do início do stream (`0`), para
+   documentos aprovados antes do primeiro worker subir também serem indexados.
+2. Baixa o PDF com `GET /internal/documents/{id}/file`.
+3. Extrai o texto, divide em chunks e gera os embeddings.
+4. Manda o resultado para `POST /internal/documents/{id}/embeddings`, no **mesmo formato da
+   resposta do `/process`**.
+5. Se qualquer passo falhar, chama `POST /internal/documents/{id}/processing-failure`.
+
+O worker **não dá `XACK`**: quem confirma a mensagem é o `akpedia-server`, depois de gravar o
+resultado (ou a falha). Uma falha não derruba o worker; ele segue para a próxima mensagem.
+Se o Redis cair, ele tenta de novo com espera crescente (até 30 s).
+
+**Mensagens pendentes ao reiniciar.** Ao subir, antes de ler mensagens novas, o worker retoma
+as mensagens que **ele mesmo** recebeu e o server nunca confirmou: o processo parou no meio de
+um documento, ou nem o aviso de falha chegou ao server. A lista é lida uma vez, com um cursor
+que avança a cada entrada — como o worker nunca dá `XACK`, ler do início de novo devolveria
+sempre a mesma mensagem. Isso só funciona se o nome do consumer for estável entre reinícios
+(`WORKER_CONSUMER`; no docker-compose o padrão é `akpedia-ml-worker`). Retomar pode reprocessar
+um documento que o server já gravou mas ainda não confirmou; o server trata o callback repetido
+como idempotente.
+
+Cada retomada conta como uma entrega (`XCLAIM`). Uma mensagem já entregue **3 vezes** não é
+tentada de novo: o worker manda `processing-failure` com o código `retry_limit_exceeded` e segue
+para a próxima. Sem esse limite, um documento que derruba o worker (um PDF que estoura a
+memória, por exemplo) seria retomado primeiro a cada reinício e travaria a fila inteira.
+
+Mensagens pendentes de **outros** consumers (um worker que sumiu de vez) ficam com o job de
+recuperação do `akpedia-server` (`XAUTOCLAIM` agendado, com o mesmo limite de 3 tentativas),
+para não haver dois componentes disputando as mesmas mensagens.
+
+### Contrato com o akpedia-server
+
+**Mensagem no stream** — uma por documento aprovado:
+
+```text
+XADD documents:processing * documentId 42
+```
+
+O `documentId` precisa ser numérico; uma mensagem sem ele é registrada no log e ignorada.
+
+**Chamadas do worker** — todas com o header `X-Internal-Token: <INTERNAL_API_TOKEN>`:
+
+| Chamada | Corpo |
+|---------|-------|
+| `GET /internal/documents/{id}/file` | — |
+| `POST /internal/documents/{id}/embeddings` | JSON igual à resposta do `/process`, mais `"messageId"` |
+| `POST /internal/documents/{id}/processing-failure` | `{"code": "...", "message": "...", "messageId": "..."}` |
+
+```json
+{
+  "filename": "manual.pdf",
+  "model": { "name": "intfloat/multilingual-e5-small", "dimensions": 384, "normalized": true },
+  "chunk_count": 2,
+  "chunks": [{ "index": 0, "text": "...", "embedding": [0.012, "..."] }],
+  "messageId": "1792167543003-0"
+}
+```
+
+- O `GET` deve responder o PDF com `Content-Type: application/pdf`. O `filename` do
+  `Content-Disposition` (o `filename*` tem preferência, como o Spring manda), se vier, é
+  repassado no campo `filename` do resultado; sem ele, o worker usa `document-{id}.pdf`.
+  Arquivos acima de `MAX_UPLOAD_BYTES` viram falha.
+- `messageId` é o id da entrada no stream. É com ele que o server faz
+  `XACK documents:processing ml-workers <messageId>` depois de gravar.
+- O `message` da falha é o texto que vai para `processing_error`; o `code` classifica a falha.
+- Qualquer resposta 2xx é sucesso.
+- O segredo é o mesmo `INTERNAL_API_TOKEN` que o server valida.
+
+`code` da falha:
+
+| `code` | Quando |
+|--------|--------|
+| `no_extractable_text` | PDF sem camada de texto (digitalizado) |
+| `unreadable_document` | arquivo corrompido ou protegido por senha |
+| `unsupported_format` | o arquivo não é um formato suportado |
+| `file_too_large` | arquivo acima de `MAX_UPLOAD_BYTES` |
+| `server_call_failed` | o download do arquivo ou o envio do resultado falhou |
+| `retry_limit_exceeded` | a mensagem já foi entregue 3 vezes sem terminar (o worker caiu no meio do documento) |
+| `processing_error` | qualquer outra falha inesperada |
+
+Se até o aviso de falha não chegar ao server, a mensagem fica pendente no group: o server
+nunca soube dela, então nunca a confirma. O próprio worker a retoma no próximo reinício, ou o
+job de recuperação do server a reivindica.
+
+Um `Content-Disposition` com nome malformado (charset desconhecido, encoded word quebrada)
+não falha o documento: o nome cai para `document-{id}.pdf`.
+
+### Logs
+
+Uma linha JSON por evento, com o `documentId`, o `messageId` e a duração (`durationMs`) de
+cada passo (`download`, `extract`, `chunk`, `embed`, `send`):
+
+```json
+{"ts": "2026-10-16T16:20:03.087+00:00", "level": "INFO", "event": "step_finished", "documentId": "42", "messageId": "1792167543003-0", "step": "embed", "durationMs": 33257.0, "chunkCount": 125}
+{"ts": "2026-10-16T16:20:03.256+00:00", "level": "INFO", "event": "document_indexed", "documentId": "42", "messageId": "1792167543003-0", "chunkCount": 125, "durationMs": 33740.4}
+```
+
+Os outros eventos são `document_received`, `step_failed` (duração do passo que falhou),
+`document_failed` (com `step`, `code` e `error`),
+`failure_report_failed`, `message_invalid`, `message_deleted`, `pending_resumed`,
+`pending_drained`, `redis_unavailable`, `worker_starting`, `model_loaded` e `worker_stopped`.
+
+### Testes
+
+`tests/test_worker.py` roda o worker contra um stream Redis e um `akpedia-server`
+simulado (um servidor HTTP de verdade numa porta local), cobrindo sucesso e falha. O Redis
+é o `fakeredis` por padrão, então a suíte não precisa de infraestrutura; para rodar contra
+um Redis real (é o que o CI faz):
+
+```bash
+REDIS_TEST_URL=redis://localhost:6379/15 uv run pytest tests/test_worker.py
+```
 
 ---
 
@@ -295,11 +538,22 @@ A aplicação lê as configurações a partir de variáveis de ambiente (com def
 | `APP_PORT`         | `8000`                           | Porta publicada pela API |
 | `HF_HOME`          | `/cache/hf`                      | Onde o modelo de embedding fica em cache (definido no Docker) |
 | `EMBEDDING_MODEL`  | `intfloat/multilingual-e5-small` | Modelo usado para gerar os embeddings |
-| `MAX_UPLOAD_BYTES` | `26214400` (25 MiB)              | Maior upload aceito pela rota de processamento |
+| `MAX_UPLOAD_BYTES` | `26214400` (25 MiB)              | Maior upload aceito pelas rotas de documento |
+| `CENTROIDS_PATH`   | `data/categories/centroids.npz`  | Centróides de categoria; caminho relativo é resolvido a partir da raiz do repositório |
+| `ANALYSIS_MAX_CHUNKS` | `20`                          | Máximo de chunks embedados para classificar um documento |
+| `CATEGORY_TEMPERATURE` | `0.05`                       | Temperatura do softmax da categoria. `1.0` é o softmax literal, que espalha a probabilidade quase igualmente porque as similaridades ficam próximas |
+| `REDIS_URL`        | `redis://localhost:6379/0`       | Worker: Redis com o stream de documentos aprovados |
+| `DOCUMENTS_STREAM` | `documents:processing`             | Worker: nome do stream |
+| `WORKER_GROUP`     | `ml-workers`                     | Worker: consumer group compartilhado pelas réplicas |
+| `WORKER_CONSUMER`  | nome do host (`akpedia-ml-worker` no docker-compose) | Worker: nome desta réplica no group. Precisa ser estável entre reinícios para retomar as próprias mensagens pendentes; com várias réplicas, um nome por réplica |
+| `SERVER_BASE_URL`  | `http://localhost:8080`          | Worker: endereço do `akpedia-server` |
+| `INTERNAL_API_TOKEN`   | — (`akpedia-dev-internal-token` no docker-compose e no dev container) | Worker: segredo do header `X-Internal-Token`, o mesmo do server. Obrigatório: sem ele o worker não sobe |
+| `SERVER_TIMEOUT_SECONDS` | `30`                       | Worker: timeout de cada chamada ao server |
 
 As variáveis são lidas uma vez, na subida do processo (`src/app/config.py`): mudar
-qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`
-derruba a aplicação no start, em vez de silenciosamente voltar ao default.
+qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`,
+`ANALYSIS_MAX_CHUNKS` ou `CATEGORY_TEMPERATURE` derruba a aplicação no start, em vez de
+silenciosamente voltar ao default.
 
 ---
 
