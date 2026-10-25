@@ -362,16 +362,19 @@ aprovação em vez de pelo upload.
 
 ```bash
 INTERNAL_API_TOKEN=... uv run python -m app.worker
-# ou, no Docker:
-docker compose --profile worker up
+# ou, no Docker, junto com a API:
+docker compose up
 ```
 
-O serviço `worker` usa a mesma imagem da API com outro comando. O Redis sobe no compose
-do `akpedia-server` (container `akpedia-redis`), que cria a rede `akpedia-net`; o worker
-entra nela e o alcança pelo nome, então suba o compose do server primeiro. O worker fica
-num *profile* próprio enquanto o server não tem os endpoints `/internal`: sem o profile,
-`docker compose up` sobe só a API. O `stop_grace_period` de 2 minutos deixa o documento em
-andamento terminar antes de o container parar.
+No dev container, `akpedia run ml` (ou só `akpedia run`) sobe a API e o worker juntos.
+
+O serviço `worker` usa a mesma imagem da API com outro comando, e o `docker compose up`
+sobe os dois. O Redis sobe no compose do `akpedia-server` (container `akpedia-redis`), que
+cria a rede `akpedia-net`; o worker entra nela e o alcança pelo nome, então suba o compose do
+server primeiro. Os dois composes caem no mesmo `INTERNAL_API_TOKEN` de desenvolvimento
+quando ele não está definido; fora do ambiente local, defina um valor de verdade nos dois. O
+`stop_grace_period` de 2 minutos deixa o documento em andamento terminar antes de o
+container parar.
 
 ### Fluxo
 
@@ -544,7 +547,7 @@ A aplicação lê as configurações a partir de variáveis de ambiente (com def
 | `WORKER_GROUP`     | `ml-workers`                     | Worker: consumer group compartilhado pelas réplicas |
 | `WORKER_CONSUMER`  | nome do host (`akpedia-ml-worker` no docker-compose) | Worker: nome desta réplica no group. Precisa ser estável entre reinícios para retomar as próprias mensagens pendentes; com várias réplicas, um nome por réplica |
 | `SERVER_BASE_URL`  | `http://localhost:8080`          | Worker: endereço do `akpedia-server` |
-| `INTERNAL_API_TOKEN`   | —                                | Worker: segredo do header `X-Internal-Token`. Obrigatório: sem ele o worker não sobe |
+| `INTERNAL_API_TOKEN`   | — (`akpedia-dev-internal-token` no docker-compose e no dev container) | Worker: segredo do header `X-Internal-Token`, o mesmo do server. Obrigatório: sem ele o worker não sobe |
 | `SERVER_TIMEOUT_SECONDS` | `30`                       | Worker: timeout de cada chamada ao server |
 
 As variáveis são lidas uma vez, na subida do processo (`src/app/config.py`): mudar
