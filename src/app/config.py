@@ -121,3 +121,28 @@ INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
 
 #: Timeout for each call to akpedia-server, in seconds.
 SERVER_TIMEOUT_SECONDS = _positive_float("SERVER_TIMEOUT_SECONDS", 30.0)
+
+# --- Language model (``app.chat.llm``) ----------------------------------------
+# O modelo roda localmente no Ollama: nenhum texto de documento sai da máquina.
+# A API sobe sem o Ollama no ar; o erro só aparece na primeira chamada ao modelo.
+
+#: Ollama server. Native API (``/api/chat``), not the OpenAI-compatible ``/v1``:
+#: only the native one accepts ``num_ctx``.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip() or "http://localhost:11434"
+
+#: Model tag served by Ollama; it must be pulled first (``ollama pull <tag>``).
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip() or "qwen2.5:3b-instruct"
+
+#: Optional bearer token, for an authenticated proxy in front of Ollama. Local Ollama
+#: needs none. Never logged.
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+
+#: Timeout for each generation, in seconds. Generating on a CPU is slow.
+LLM_TIMEOUT_SECONDS = _positive_float("LLM_TIMEOUT_SECONDS", 120.0)
+
+#: Context window sent as ``num_ctx``. Ollama silently drops the start of a prompt
+#: that does not fit, which would drop the retrieved chunks, so it is set explicitly.
+LLM_CONTEXT_TOKENS = _positive_int("LLM_CONTEXT_TOKENS", 8192)
+
+#: Most tokens generated per answer, sent as ``num_predict``.
+LLM_MAX_OUTPUT_TOKENS = _positive_int("LLM_MAX_OUTPUT_TOKENS", 512)

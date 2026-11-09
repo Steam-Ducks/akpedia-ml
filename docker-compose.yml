@@ -14,6 +14,13 @@ services:
       CENTROIDS_PATH: ${CENTROIDS_PATH:-}
       ANALYSIS_MAX_CHUNKS: ${ANALYSIS_MAX_CHUNKS:-}
       CATEGORY_TEMPERATURE: ${CATEGORY_TEMPERATURE:-}
+      # Modelo de linguagem local: o Ollama é alcançado pelo nome do serviço.
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-}
+      LLM_CONTEXT_TOKENS: ${LLM_CONTEXT_TOKENS:-}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-}
     volumes:
       - .:/app
       - model-cache:/cache
@@ -60,8 +67,20 @@ services:
       - default
       - akpedia-net
 
+  # Modelo de linguagem local (Ollama). Sem porta publicada no host: só a API deste
+  # compose fala com ele, e nenhum texto de documento sai da máquina. Os pesos ficam no
+  # volume ollama-models; baixe o modelo uma vez com:
+  #   docker compose exec ollama ollama pull qwen2.5:3b-instruct
+  ollama:
+    image: ollama/ollama:0.12.6
+    container_name: akpedia-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+
 volumes:
   model-cache:
+  ollama-models:
 
 networks:
   # Criada pelo compose do akpedia-server, dono do Redis.

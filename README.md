@@ -57,6 +57,8 @@ akpedia-ml/
 │       ├── config.py # configurações lidas de variáveis de ambiente
 │       ├── embeddings.py # contrato Embedder + modelo e5 + get_embedder()
 │       ├── worker.py # worker de indexação: python -m app.worker
+│       ├── chat/
+│       │   └── llm.py # contrato LLMClient + cliente do Ollama + FakeLLMClient
 │       ├── analysis/ # sugestões para o formulário de upload
 │       │   ├── __init__.py
 │       │   ├── suggestions.py # regras de título e descrição
@@ -85,6 +87,7 @@ akpedia-ml/
     ├── test_pdf_inspection.py # leitura de metadados, fontes e parágrafos
     ├── test_build_centroids.py # script de geração dos centróides
     ├── test_worker.py # worker contra Redis (fakeredis) e um server simulado
+    ├── test_llm_client.py # cliente do LLM com transporte simulado, sem Ollama
     ├── test_chunking.py # divisão em chunks e overlap
     ├── test_health.py # teste do endpoint /health
     ├── test_extractor_registry.py # registro de formatos e ponto de extensão
@@ -529,6 +532,71 @@ e5. Os tamanhos padrão de chunk também assumem a janela de 512 tokens do e5.
 
 ---
 
+## Modelo de linguagem (LLM local)
+
+O chatbot escreve a resposta com um modelo de linguagem que roda na nossa máquina. Os
+documentos são sensíveis, então nenhum texto vai para uma API externa.
+
+Duas peças trabalham juntas:
+
+- **Ollama** é o servidor: carrega os pesos do modelo e abre uma API HTTP. Sobe como o
+  serviço `ollama` do `docker-compose.yml`, sem porta publicada no host.
+- **Qwen 2.5 3B Instruct** (`qwen2.5:3b-instruct`) é o modelo que o Ollama roda. Escreve
+  bem em português e roda em CPU com uns 4 GB de RAM. Trocar de modelo é só mudar
+  `LLM_MODEL` e baixar o novo.
+
+### Subindo
+
+```bash
+docker compose up -d ollama
+# uma vez só: baixa os pesos (~2 GB) para o volume ollama-models
+docker compose exec ollama ollama pull qwen2.5:3b-instruct
+```
+
+A internet só entra nesse `pull`. Depois disso o modelo responde offline. A API sobe
+mesmo sem o Ollama no ar; o erro aparece na primeira chamada ao modelo.
+
+### Como o modelo entra no RAG
+
+O modelo nunca acessa o banco vetorial. Ele recebe mensagens e devolve texto. Quem busca
+os trechos no pgvector do `akpedia-server` monta o prompt com eles:
+
+```
+pergunta ──► e5-small (embed_query) ──► vetor
+vetor ──► pgvector do akpedia-server (ORDER BY vector <=> q) ──► top-K trechos
+pergunta + trechos ──► mensagens (system + user) ──► LLMClient.complete() ──► resposta
+```
+
+Este módulo entrega o último passo. A rota de resposta e o prompt ficam em outra task.
+
+### Usando o cliente
+
+```python
+from app.chat.llm import ChatMessage, get_llm_client
+
+completion = get_llm_client().complete(
+    [
+        ChatMessage("system", "Responda só com base nos trechos. Cite o trecho, ex.: [1]."),
+        ChatMessage("user", "Trechos:\n[1] O prazo de reembolso é de 7 dias.\n\nPergunta: Qual o prazo?"),
+    ]
+)
+completion.text  # "O prazo é de 7 dias [1]."
+completion.finish_reason  # "stop", ou "length" se a resposta foi cortada
+completion.prompt_tokens  # para calibrar quantos trechos cabem no contexto
+```
+
+| Detalhe | Por quê |
+|---------|---------|
+| API nativa `/api/chat`, não a `/v1` compatível com OpenAI | Só a nativa aceita `num_ctx`. Sem ele o Ollama usa uma janela pequena e descarta o começo do prompt sem avisar, justamente onde ficam os trechos |
+| `num_ctx` = `LLM_CONTEXT_TOKENS` (8192) | Cabem ~10 trechos de 512 tokens com folga para a resposta. Aumentar custa RAM e latência |
+| Aviso `llm_prompt_near_context_limit` no log | O prompt chegou a 95% da janela: o Ollama pode ter cortado parte dele |
+| Log só com modelo, tokens e duração | Prompt e resposta carregam conteúdo dos documentos |
+| `LLMUnavailableError` | Ollama fora do ar ou timeout; quem chama responde 503 |
+| `LLMError` | Modelo não baixado (a mensagem traz o `ollama pull`), HTTP de erro ou resposta malformada |
+| `FakeLLMClient` | Dublê para testes: responde de uma fila e guarda as mensagens em `calls` |
+
+---
+
 ## Configuração
 
 A aplicação lê as configurações a partir de variáveis de ambiente (com defaults para dev):
@@ -549,6 +617,12 @@ A aplicação lê as configurações a partir de variáveis de ambiente (com def
 | `SERVER_BASE_URL`  | `http://localhost:8080`          | Worker: endereço do `akpedia-server` |
 | `INTERNAL_API_TOKEN`   | — (`akpedia-dev-internal-token` no docker-compose e no dev container) | Worker: segredo do header `X-Internal-Token`, o mesmo do server. Obrigatório: sem ele o worker não sobe |
 | `SERVER_TIMEOUT_SECONDS` | `30`                       | Worker: timeout de cada chamada ao server |
+| `LLM_BASE_URL`     | `http://localhost:11434` (`http://ollama:11434` no docker-compose) | Endereço do Ollama |
+| `LLM_MODEL`        | `qwen2.5:3b-instruct`            | Tag do modelo no Ollama; precisa de `ollama pull` antes |
+| `LLM_API_KEY`      | —                                | Token opcional para um proxy autenticado na frente do Ollama. O Ollama local não usa. Nunca vai para log |
+| `LLM_TIMEOUT_SECONDS` | `120`                         | Timeout de cada geração |
+| `LLM_CONTEXT_TOKENS` | `8192`                         | Janela de contexto (`num_ctx`) |
+| `LLM_MAX_OUTPUT_TOKENS` | `512`                       | Máximo de tokens gerados por resposta (`num_predict`) |
 
 As variáveis são lidas uma vez, na subida do processo (`src/app/config.py`): mudar
 qualquer uma delas exige reiniciar o serviço. Um valor inválido em `MAX_UPLOAD_BYTES`,
