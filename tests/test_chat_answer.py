@@ -268,7 +268,22 @@ def test_strip_invalid_citations() -> None:
         ("Primeira [1]. Segunda inco", "Primeira [1]."),
         ("Primeira. [1] Segunda inco", "Primeira. [1]"),
         ("Nenhuma frase completa", ""),
+        # A period between digits is a number separator, not a sentence end.
+        ("O prazo é de 7 dias [1]. O limite é R$ 1.500 por di", "O prazo é de 7 dias [1]."),
+        ("A taxa é 5.2 ao m", ""),
+        ("O limite é R$ 1.500 [2]. Além di", "O limite é R$ 1.500 [2]."),
+        # A sentence that ends in a number is still complete.
+        ("Hotel até R$ 300. Além di", "Hotel até R$ 300."),
+        ("Hotel até R$ 300 [2]! Além di", "Hotel até R$ 300 [2]!"),
     ],
 )
 def test_drop_unfinished_sentence(text: str, expected: str) -> None:
     assert drop_unfinished_sentence(text) == expected
+
+
+def test_truncated_thousands_separator_never_becomes_the_answer(use_llm) -> None:
+    llm = ScriptedLLM("O prazo é de 7 dias [1]. O limite é R$ 1.500 por di", finish_reason="length")
+
+    response = ask(use_llm(llm))
+
+    assert response.json() == {"answer": "O prazo é de 7 dias [1].", "found": True, "sources": ["doc-a"]}

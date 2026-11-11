@@ -31,7 +31,9 @@ TEMPLATE_OVERHEAD_TOKENS = 64
 _CITATION = re.compile(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]")
 
 #: End of the last complete sentence, with the citations that may follow the period.
-_SENTENCE_END = re.compile(r"[.!?](?:\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\])*")
+#: A period followed by a digit is a thousands or decimal separator ("R$ 1.500",
+#: "5.2"), not a sentence end; a period after a digit still is ("até R$ 300.").
+_SENTENCE_END = re.compile(r"[.!?](?!\d)(?:\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\])*")
 
 SYSTEM_PROMPT = f"""\
 Você é o assistente de uma base de documentos. Responda à pergunta do usuário usando \
