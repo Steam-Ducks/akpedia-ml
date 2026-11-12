@@ -58,14 +58,17 @@ akpedia-ml/
 │       ├── embeddings.py # contrato Embedder + modelo e5 + get_embedder()
 │       ├── worker.py # worker de indexação: python -m app.worker
 │       ├── chat/
-│       │   └── llm.py # contrato LLMClient + cliente do Ollama + FakeLLMClient
+│       │   ├── llm.py # contrato LLMClient + cliente do Ollama + FakeLLMClient
+│       │   ├── prompt.py # prompt do chat: trechos numerados e leitura das citações
+│       │   └── answer.py # answer_question(): resposta citada ou found=false
 │       ├── analysis/ # sugestões para o formulário de upload
 │       │   ├── __init__.py
 │       │   ├── suggestions.py # regras de título e descrição
 │       │   └── categories.py # centróides, média dos vetores e softmax
 │       ├── api/
 │       │   ├── __init__.py
-│       │   └── documents.py # POST /api/v1/documents/process e /analyze
+│       │   ├── documents.py # POST /api/v1/documents/process e /analyze
+│       │   └── chat.py # POST /api/v1/chat/answer
 │       └── documents/ # leitura e extração de texto dos documentos
 │           ├── __init__.py # API pública do pacote
 │           ├── base.py # contrato DocumentTextExtractor + normalização do texto
