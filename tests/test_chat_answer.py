@@ -97,6 +97,32 @@ def test_sources_follow_citation_order(use_llm) -> None:
     assert ask(client).json()["sources"] == ["doc-b", "doc-a"]
 
 
+def test_list_answer_keeps_every_item_and_its_sources(use_llm) -> None:
+    client = use_llm(FakeLLMClient(["- O prazo é de 7 dias [1].\n- O hotel custa até R$ 300 [2]."]))
+
+    assert ask(client).json() == {
+        "answer": "- O prazo é de 7 dias [1].\n- O hotel custa até R$ 300 [2].",
+        "found": True,
+        "sources": ["doc-a", "doc-b"],
+    }
+
+
+def test_truncated_list_keeps_complete_items(use_llm) -> None:
+    truncated = "- O prazo é de 7 dias [1].\n- O hotel custa até R$ 300 [2].\n- Envie a no"
+    llm = ScriptedLLM(truncated, finish_reason="length")
+
+    assert ask(use_llm(llm)).json() == {
+        "answer": "- O prazo é de 7 dias [1].\n- O hotel custa até R$ 300 [2].",
+        "found": True,
+        "sources": ["doc-a", "doc-b"],
+    }
+
+
+def test_prompt_asks_for_a_cited_list() -> None:
+    assert "uma lista curta, de 1 a 4 itens" in SYSTEM_PROMPT
+    assert "- O reembolso é pago em até 7 dias corridos [1]." in SYSTEM_PROMPT
+
+
 def test_prompt_numbers_passages_and_carries_question(use_llm) -> None:
     fake = FakeLLMClient(["Resposta [1]."])
     ask(use_llm(fake))
