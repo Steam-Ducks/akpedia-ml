@@ -123,6 +123,17 @@ def test_prompt_asks_for_a_cited_list() -> None:
     assert "- O reembolso é pago em até 7 dias corridos [1]." in SYSTEM_PROMPT
 
 
+def test_truncated_list_without_periods_keeps_complete_items(use_llm) -> None:
+    truncated = "- O prazo é de 7 dias [1]\n- O hotel custa até R$ 300 [2]\n- Envie a no"
+    llm = ScriptedLLM(truncated, finish_reason="length")
+
+    assert ask(use_llm(llm)).json() == {
+        "answer": "- O prazo é de 7 dias [1]\n- O hotel custa até R$ 300 [2]",
+        "found": True,
+        "sources": ["doc-a", "doc-b"],
+    }
+
+
 def test_prompt_numbers_passages_and_carries_question(use_llm) -> None:
     fake = FakeLLMClient(["Resposta [1]."])
     ask(use_llm(fake))
@@ -301,6 +312,17 @@ def test_strip_invalid_citations() -> None:
         # A sentence that ends in a number is still complete.
         ("Hotel até R$ 300. Além di", "Hotel até R$ 300."),
         ("Hotel até R$ 300 [2]! Além di", "Hotel até R$ 300 [2]!"),
+        # A list item may end in its citation and a line break, with no period.
+        (
+            "- O prazo é de 7 dias [1]\n- Hotel até R$ 300 [2]\n- Envie a no",
+            "- O prazo é de 7 dias [1]\n- Hotel até R$ 300 [2]",
+        ),
+        (
+            "- O prazo é de 7 dias [1].\n- Hotel até R$ 300 [2]\n- Envie a no",
+            "- O prazo é de 7 dias [1].\n- Hotel até R$ 300 [2]",
+        ),
+        # A citation in the middle of a line is not the end of an item.
+        ("O prazo [1] e o hotel [2] custam pou", ""),
     ],
 )
 def test_drop_unfinished_sentence(text: str, expected: str) -> None:

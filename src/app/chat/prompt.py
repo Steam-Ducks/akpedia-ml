@@ -31,10 +31,14 @@ TEMPLATE_OVERHEAD_TOKENS = 64
 #: ``[1]``, ``[2, 3]`` or ``[2,3]``: one bracket may cite more than one passage.
 _CITATION = re.compile(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]")
 
-#: End of the last complete sentence, with the citations that may follow the period.
+#: End of the last complete sentence, with the citations that may follow the period, or
+#: of a list item that ends in a citation and a line break but no period.
 #: A period followed by a digit is a thousands or decimal separator ("R$ 1.500",
 #: "5.2"), not a sentence end; a period after a digit still is ("até R$ 300.").
-_SENTENCE_END = re.compile(r"[.!?](?!\d)(?:\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\])*")
+_SENTENCE_END = re.compile(
+    r"[.!?](?!\d)(?:\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\])*"
+    r"|\[\s*\d+(?:\s*,\s*\d+)*\s*\](?=[ \t]*\n)"
+)
 
 #: A short list, one cited sentence per item: the small local model cites far more
 #: reliably item by item, copying the example, than it does inside free prose.
