@@ -2,8 +2,8 @@
 
 The answer is a list of 1 to 4 items. The passages are numbered ``[1]``, ``[2]``... in
 the order they arrive, and the model ends each item with the number of the passage it
-came from. Those numbers are
-what :func:`cited_passages` reads back to tell which documents were actually used.
+came from. Those numbers are what :func:`cited_passages` reads back to tell which
+documents were actually used.
 
 When the passages do not answer the question, the model replies with
 :data:`NOT_FOUND_TOKEN` alone instead of making something up.

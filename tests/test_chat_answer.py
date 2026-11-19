@@ -118,9 +118,12 @@ def test_truncated_list_keeps_complete_items(use_llm) -> None:
     }
 
 
-def test_prompt_asks_for_a_cited_list() -> None:
-    assert "uma lista curta, de 1 a 4 itens" in SYSTEM_PROMPT
-    assert "- O reembolso é pago em até 7 dias corridos [1]." in SYSTEM_PROMPT
+def test_prompt_example_answers_with_a_cited_list() -> None:
+    items = [line for line in SYSTEM_PROMPT.splitlines() if line.startswith("- ")]
+
+    assert len(items) >= 2
+    assert all(cited_passages(item, 9) for item in items)
+    assert NOT_FOUND_TOKEN in SYSTEM_PROMPT
 
 
 def test_truncated_list_without_periods_keeps_complete_items(use_llm) -> None:
