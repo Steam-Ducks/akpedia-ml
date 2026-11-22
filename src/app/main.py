@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -5,9 +6,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.analysis import get_centroids
+from app.api.chat import router as chat_router
 from app.api.documents import ErrorResponse
 from app.api.documents import router as documents_router
 from app.api.embeddings import router as embeddings_router
+from app.chat.llm import LLMError
 from app.documents import (
     DocumentReadError,
     FileTooLargeError,
@@ -15,6 +18,8 @@ from app.documents import (
     UnsupportedDocumentFormatError,
     default_registry,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -29,6 +34,7 @@ app = FastAPI(title="akpedia-ml", version="0.1.0", lifespan=lifespan)
 
 app.include_router(documents_router)
 app.include_router(embeddings_router)
+app.include_router(chat_router)
 
 
 @app.get("/health")
@@ -72,3 +78,15 @@ def handle_no_extractable_text(request: Request, exc: NoExtractableTextError) ->
 def handle_file_too_large(request: Request, exc: FileTooLargeError) -> JSONResponse:
     """413: the upload is past the accepted size, so it was never read."""
     return _error(413, ErrorResponse(code="file_too_large", message=str(exc)))
+
+
+@app.exception_handler(LLMError)
+def handle_llm_error(request: Request, exc: LLMError) -> JSONResponse:
+    """503: the language model failed or did not answer in time.
+
+    The details (model server address, missing model) go to the log, not to the caller.
+    """
+    logger.warning("llm_error error=%s detail=%s", type(exc).__name__, exc)
+    return _error(
+        503, ErrorResponse(code="llm_unavailable", message="The language model is unavailable. Try again later.")
+    )
